@@ -1,0 +1,42 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+env/
+.env/
+conda-env/
+
+# IDE settings
+.idea/
+.vscode/
+
+# Jupyter notebooks
+.ipynb_checkpoints/
+
+# Python packaging
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# Testing and linting
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Environment variables and secrets
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Operating system files
+.DS_Store
+Thumbs.db
+desktop.ini
