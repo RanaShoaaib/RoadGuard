@@ -81,8 +81,10 @@ def validate_config(raw: dict[str, Any]) -> dict[str, Any]:
         value = _number(t.get(field, 0), f"teacher.{field}")
         if value > 1:
             raise ValueError(f"teacher.{field} must be <= 1")
+    if t.get("depth_dropout_fraction", 0.2) == 0:
+        raise ValueError("teacher.depth_dropout_fraction must be > 0")
     for field in ("depth_noise_std_m", "depth_dropout_probability", "depth_dropout_fraction"):
-        t.setdefault(field, 0.0)
+        t.setdefault(field, 0.2 if field == "depth_dropout_fraction" else 0.0)
 
     s = config["student"]
     _keys(s, {"kd_weight", "temperature"}, "student")
