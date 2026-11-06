@@ -32,31 +32,28 @@ def seed_everything(seed: int) -> None:
 
 
 def load_lofo_fold(path: str | Path, family: str) -> dict[str, pd.DataFrame]:
-    """Notebook 1 fold CSV already includes static AND fixed normality partitions."""
+    """Load and validate a Notebook 1 LOFO fold CSV (test = unseen family, val = held-out objects)."""
     fold = pd.read_csv(path, dtype={"scenario_id": str, "frame_id": str})
-    required = set(RoadGuardDataset.REQUIRED_COLUMNS) | {"source", "anomaly_family", "split"}
+    required = set(RoadGuardDataset.REQUIRED_COLUMNS) | {"anomaly_family", "anomaly_object", "split"}
     if not required.issubset(fold.columns):
         raise ValueError(f"LOFO fold missing columns: {sorted(required - set(fold.columns))}")
     if fold.empty or fold[list(required)].isna().any().any():
         raise ValueError("LOFO fold contains no rows or missing required values")
     if not fold["split"].isin(["train", "val", "test"]).all():
         raise ValueError("Unknown split label")
-    if not fold["source"].isin(["static", "normality"]).all():
-        raise ValueError("Unexpected data source")
-    if fold.duplicated(["source", "scenario_id", "frame_id"]).any():
+    if fold.duplicated(["scenario_id", "frame_id"]).any():
         raise ValueError("Duplicate frame in fold")
-    if (fold.groupby(["source", "scenario_id"])["split"].nunique() > 1).any():
+    if (fold.groupby("scenario_id")["split"].nunique() > 1).any():
         raise ValueError("Scenario leakage across partitions")
-    static = fold[fold["source"] == "static"]
-    normal = fold[fold["source"] == "normality"]
-    if static.empty or normal.empty:
-        raise ValueError("LOFO fold must include static and normality samples")
-    if not (static.loc[static["anomaly_family"] == family, "split"] == "test").all():
+    if not (fold.loc[fold["anomaly_family"] == family, "split"] == "test").all():
         raise ValueError("Held-out family appears outside test")
-    if not (static.loc[static["anomaly_family"] != family, "split"] != "test").all():
+    if not (fold.loc[fold["anomaly_family"] != family, "split"] != "test").all():
         raise ValueError("Other anomaly families appear in test")
-    if not (static["anomaly_family"] == family).any():
+    if not (fold["anomaly_family"] == family).any():
         raise ValueError(f"Held-out family {family!r} absent")
+    objects = fold.groupby("split")["anomaly_object"].agg(set)
+    if "train" in objects and "val" in objects and objects["train"] & objects["val"]:
+        raise ValueError("Anomaly object leakage between train and val")
     parts = {s: fold.loc[fold["split"] == s].copy() for s in ("train", "val", "test")}
     if any(part.empty for part in parts.values()):
         raise ValueError("Every partition must contain samples")
@@ -133,8 +130,7 @@ def run_experiment(config_path: str | Path, fold_path: str | Path,
                    device: str | None = None) -> dict:
     """Train all roles and evaluate best checkpoints once on the held-out test set.
 
-    The fold_path is processed/lofo_splits/<family>.csv from Notebook 1,
-    already containing fixed normality train/val/test rows.
+    The fold_path is processed/lofo_splits/<family>.csv from Notebook 1.
     """
     config = load_config(config_path)
     if not 0.0 < config["evaluation"]["threshold"] < 1.0:
@@ -148,7 +144,7 @@ def run_experiment(config_path: str | Path, fold_path: str | Path,
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "config.json").write_text(json.dumps(config, indent=2), encoding="utf-8")
     (run_dir / "partition_counts.json").write_text(
-        json.dumps({k: {"frames": len(v), "scenarios": int(v[["source", "scenario_id"]].drop_duplicates().shape[0])}
+        json.dumps({k: {"frames": len(v), "scenarios": int(v["scenario_id"].nunique())}
                     for k, v in parts.items()}, indent=2), encoding="utf-8")
     device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
     seed_everything(seed)

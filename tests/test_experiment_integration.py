@@ -17,16 +17,16 @@ def test_complete_three_role_experiment(tmp_path, held_out_family):
     data_root = tmp_path / "data"
     data_root.mkdir()
     rows = []
-    # Two training scenarios, two validation scenarios, two test scenarios.
+    # (family, object, scenario, split, anomaly visible): train and val use different objects.
     scenarios = [
-        ("static", "home", "home_train", "train", True),
-        ("normality", "normality", "normal_train", "train", False),
-        ("static", "home", "home_val", "val", True),
-        ("normality", "normality", "normal_val", "val", False),
-        ("static", held_out_family, "special_test", "test", True),
-        ("normality", "normality", "normal_test", "test", False),
+        ("home", "box", "home_train", "train", True),
+        ("home", "box", "home_train_empty", "train", False),
+        ("home", "chair", "home_val", "val", True),
+        ("home", "chair", "home_val_empty", "val", False),
+        (held_out_family, "naga", "special_test", "test", True),
+        (held_out_family, "naga", "special_test_empty", "test", False),
     ]
-    for idx, (source, family, scenario, split, anomalous) in enumerate(scenarios):
+    for idx, (family, obj, scenario, split, anomalous) in enumerate(scenarios):
         rgb = np.full((32, 32, 3), 65 + idx * 20, dtype=np.uint8)
         rgb[:, :, 1] = 90
         # CARLA depth encoding: R is least-significant byte, B most-significant.
@@ -39,7 +39,7 @@ def test_complete_three_role_experiment(tmp_path, held_out_family):
         for name, array in zip(names, (rgb, depth, mask)):
             Image.fromarray(array).save(data_root / name)
         rows.append({
-            "source": source, "anomaly_family": family, "scenario_id": scenario,
+            "anomaly_family": family, "anomaly_object": obj, "scenario_id": scenario,
             "frame_id": "0", "split": split, "rgb_path": names[0],
             "depth_path": names[1], "mask_path": names[2],
         })

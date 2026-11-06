@@ -11,7 +11,7 @@ import torch
 
 
 class SegmentationMetrics:
-    """Accumulate pixel metrics over batches, including normality images.
+    """Accumulate pixel metrics over batches, including frames without any anomaly.
 
     Args:
         threshold: Pixels with sigmoid(logit) >= threshold are predicted positive.

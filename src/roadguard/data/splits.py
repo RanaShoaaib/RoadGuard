@@ -1,143 +1,114 @@
+import math
 
 import numpy as np
 import pandas as pd
 
 
-def create_standard_split(
-    manifest: pd.DataFrame,
-    train_ratio: float = 0.7,
-    val_ratio: float = 0.15,
-    test_ratio: float = 0.15,
-    seed: int = 42,
-) -> pd.DataFrame:
-    """Assign scenario-disjoint train, val, and test splits."""
-
-    if not np.isclose(train_ratio + val_ratio + test_ratio, 1.0):
-        raise ValueError("Split ratios must sum to 1")
-
-    if min(train_ratio, val_ratio, test_ratio) <= 0:
-        raise ValueError("Split ratios must be positive")
-
-    if manifest.empty:
-        raise ValueError("Manifest is empty")
-
-    scenarios = manifest[
-        ["source", "scenario_id"]
-    ].drop_duplicates()
-
-    n = len(scenarios)
-
-    if n < 3:
-        raise ValueError("At least 3 scenarios are required")
-
-    rng = np.random.default_rng(seed)
-    indices = rng.permutation(n)
-
-    n_train = int(n * train_ratio)
-    n_val = int(n * val_ratio)
-
-    # Ensure each split has at least one scenario.
-    n_train = max(1, n_train)
-    n_val = max(1, n_val)
-    n_test = n - n_train - n_val
-
-    if n_test < 1:
-        raise ValueError("Not enough scenarios for the requested ratios")
-
-    split_labels = np.empty(n, dtype=object)
-
-    split_labels[indices[:n_train]] = "train"
-    split_labels[indices[n_train:n_train + n_val]] = "val"
-    split_labels[indices[n_train + n_val:]] = "test"
-
-    scenarios = scenarios.copy()
-    scenarios["split"] = split_labels
-
-    result = manifest.merge(
-        scenarios,
-        on=["source", "scenario_id"],
-        how="left",
-        validate="many_to_one",
-    )
-
-    return result
-
-
-
 def create_lofo_splits(
     manifest: pd.DataFrame,
-    val_ratio: float = 0.15,
+    val_frac: float = 0.2,
+    min_family_scenarios: int = 8,
     seed: int = 42,
 ) -> dict[str, pd.DataFrame]:
-    """Create leave-one-anomaly-family-out scenario-disjoint splits."""
+    """Leave-one-anomaly-family-out splits with object-disjoint validation.
 
-    if not 0 < val_ratio < 1:
-        raise ValueError("val_ratio must be between 0 and 1")
+    One fold per family with at least ``min_family_scenarios`` scenarios:
+      * test  : every scenario of the held-out family (an unseen family),
+      * val   : whole anomaly objects of the other families, about ``val_frac`` of each family's
+                scenarios, chosen once per family so the same objects validate in every fold,
+      * train : everything else. Families smaller than ``min_family_scenarios`` are too small to
+                test on and are always train.
+    An anomaly object is never in train and val together, and a scenario is never split.
+    """
+    if not 0 < val_frac < 1:
+        raise ValueError("val_frac must be between 0 and 1")
 
     if manifest.empty:
         raise ValueError("Manifest is empty")
 
-    if not (manifest["source"] == "static").all():
-        raise ValueError("LOFO requires static anomaly scenarios only")
+    required = {"scenario_id", "anomaly_family", "anomaly_object"}
+    if not required.issubset(manifest.columns):
+        raise ValueError(f"Manifest missing columns: {sorted(required - set(manifest.columns))}")
 
-    scenarios = manifest[
-        ["source", "scenario_id", "anomaly_family"]
-    ].drop_duplicates()
+    scenarios = manifest[["scenario_id", "anomaly_family", "anomaly_object"]].drop_duplicates()
 
     if scenarios["scenario_id"].duplicated().any():
-        raise ValueError("A scenario belongs to multiple anomaly families")
+        raise ValueError("A scenario belongs to multiple anomaly families or objects")
 
-    families = sorted(scenarios["anomaly_family"].unique())
+    counts = scenarios.groupby("anomaly_family")["scenario_id"].nunique()
+    fold_families = sorted(counts[counts >= min_family_scenarios].index)
 
-    if len(families) < 2:
-        raise ValueError("LOFO requires at least two anomaly families")
+    if len(fold_families) < 2:
+        raise ValueError(
+            f"LOFO requires at least two anomaly families with >= {min_family_scenarios} "
+            f"scenarios, got {counts.to_dict()}"
+        )
+
+    val_objects = {}
+
+    for family in fold_families:
+        part = scenarios[scenarios["anomaly_family"] == family]
+        scenarios_per_object = part.groupby("anomaly_object")["scenario_id"].nunique()
+        objects = sorted(scenarios_per_object.index)
+
+        # A per-family generator keeps a family's validation objects stable when other families change.
+        rng = np.random.default_rng([seed, *map(ord, family)])
+        rng.shuffle(objects)
+
+        target = math.ceil(val_frac * len(part))
+        chosen, covered = set(), 0
+
+        for obj in objects:
+            # Always leave at least one object for training.
+            if covered >= target or len(chosen) >= len(objects) - 1:
+                break
+            chosen.add(obj)
+            covered += int(scenarios_per_object[obj])
+
+        val_objects[family] = chosen
 
     folds = {}
 
-    for held_out_family in families:
+    for held_out_family in fold_families:
         scenario_splits = scenarios.copy()
         scenario_splits["split"] = "train"
 
-        test_mask = (
-            scenario_splits["anomaly_family"] == held_out_family
-        )
-        scenario_splits.loc[test_mask, "split"] = "test"
-
-        rng = np.random.default_rng(seed)
-
-        for family in families:
+        for family in fold_families:
             if family == held_out_family:
                 continue
-
-            family_indices = scenario_splits.index[
-                scenario_splits["anomaly_family"] == family
-            ].to_numpy()
-
-            n = len(family_indices)
-
-            if n < 2:
-                continue
-
-            n_val = max(1, int(n * val_ratio))
-            n_val = min(n_val, n - 1)
-
-            selected = rng.choice(
-                family_indices,
-                size=n_val,
-                replace=False,
+            is_val = (
+                (scenario_splits["anomaly_family"] == family)
+                & scenario_splits["anomaly_object"].isin(val_objects[family])
             )
+            scenario_splits.loc[is_val, "split"] = "val"
 
-            scenario_splits.loc[selected, "split"] = "val"
+        scenario_splits.loc[
+            scenario_splits["anomaly_family"] == held_out_family, "split"
+        ] = "test"
 
-        fold = manifest.merge(
-            scenario_splits[
-                ["source", "scenario_id", "split"]
-            ],
-            on=["source", "scenario_id"],
+        folds[held_out_family] = manifest.merge(
+            scenario_splits[["scenario_id", "split"]],
+            on="scenario_id",
             how="left",
             validate="many_to_one",
         )
 
-        folds[held_out_family] = fold
-
     return folds
+
+
+def summarize_folds(folds: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """One row per fold: families, scenarios and frames in each split."""
+    rows = []
+
+    for held_out_family, fold in folds.items():
+        row = {"test_family": held_out_family}
+
+        for split in ("train", "val", "test"):
+            part = fold[fold["split"] == split]
+            row[f"{split}_families"] = ",".join(sorted(part["anomaly_family"].unique()))
+            row[f"{split}_scenarios"] = part["scenario_id"].nunique()
+            row[f"{split}_frames"] = len(part)
+
+        rows.append(row)
+
+    return pd.DataFrame(rows)

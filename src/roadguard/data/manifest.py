@@ -4,30 +4,26 @@ import numpy as np
 from PIL import Image
 
 
+def _archive_dirs(data_root: Path) -> list[Path]:
+    """Directories under ``data_root`` that hold ANOVOX scenarios (one per prepared archive)."""
+    return [
+        path for path in sorted(data_root.iterdir())
+        if path.is_dir() and any(path.glob("Scenario_*"))
+    ]
+
+
 def build_master_manifest(
     data_root: str | Path,
     scenario_metadata: pd.DataFrame,
     mask_metadata: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Build a frame-level manifest for ANOVOX Town04."""
+    """Build a frame-level manifest for the ANOVOX archive directories under ``data_root``."""
 
     data_root = Path(data_root)
     records = []
     seen_frames = set()
 
-    for dataset_dir in sorted(data_root.iterdir()):
-        if not dataset_dir.is_dir():
-            continue
-
-        name = dataset_dir.name.lower()
-
-        if "static" in name:
-            source = "static"
-        elif "normality" in name:
-            source = "normality"
-        else:
-            continue
-
+    for dataset_dir in _archive_dirs(data_root):
         for scenario_dir in sorted(dataset_dir.glob("Scenario_*")):
             if not scenario_dir.is_dir():
                 continue
@@ -37,11 +33,11 @@ def build_master_manifest(
             for rgb_path in sorted(scenario_dir.glob("RGB-CAM*/*.png")):
                 frame_id = rgb_path.stem.rsplit("_", 1)[-1]
 
-                frame_key = (source, scenario_id, frame_id)
+                frame_key = (scenario_id, frame_id)
 
                 if frame_key in seen_frames:
                     raise ValueError(
-                        f"Duplicate RGB frame: {source}/{scenario_id}/{frame_id}"
+                        f"Duplicate RGB frame: {scenario_id}/{frame_id}"
                     )
 
                 seen_frames.add(frame_key)
@@ -53,12 +49,11 @@ def build_master_manifest(
                 if len(depth_files) != 1:
                     raise ValueError(
                         f"Expected one depth image for "
-                        f"{source}/{scenario_id}/{frame_id}, "
+                        f"{scenario_id}/{frame_id}, "
                         f"found {len(depth_files)}"
                     )
 
                 records.append({
-                    "source": source,
                     "scenario_id": scenario_id,
                     "frame_id": frame_id,
                     "rgb_path": str(rgb_path.relative_to(data_root)),
@@ -68,7 +63,6 @@ def build_master_manifest(
     manifest = pd.DataFrame(
         records,
         columns=[
-            "source",
             "scenario_id",
             "frame_id",
             "rgb_path",
@@ -76,20 +70,9 @@ def build_master_manifest(
         ],
     )
 
-    mask_metadata = mask_metadata.copy()
-
-    mask_metadata["source"] = mask_metadata["semantic_path"].apply(
-        lambda path: (
-            "normality"
-            if "normality" in Path(path).parts[0].lower()
-            else "static"
-        )
-    )
-
     manifest = manifest.merge(
         mask_metadata[
             [
-                "source",
                 "scenario_id",
                 "frame_id",
                 "semantic_path",
@@ -97,7 +80,7 @@ def build_master_manifest(
                 "anomaly_pixels",
             ]
         ],
-        on=["source", "scenario_id", "frame_id"],
+        on=["scenario_id", "frame_id"],
         how="left",
         validate="one_to_one",
     )
@@ -109,14 +92,14 @@ def build_master_manifest(
     manifest = manifest.merge(
         scenario_metadata[
             [
-                "source",
                 "scenario_id",
                 "town",
                 "anomaly_family",
                 "anomaly_blueprint",
+                "anomaly_object",
             ]
         ],
-        on=["source", "scenario_id"],
+        on=["scenario_id"],
         how="left",
         validate="many_to_one",
         indicator=True,
@@ -142,7 +125,7 @@ def validate_manifest(
     data_root = Path(data_root)
 
     required_columns = [
-        "source", "scenario_id", "frame_id",
+        "scenario_id", "frame_id",
         "rgb_path", "depth_path", "semantic_path",
         "mask_path", "anomaly_pixels",
     ]
@@ -154,14 +137,14 @@ def validate_manifest(
     if manifest.empty:
         raise ValueError("Manifest is empty")
 
-    frame_keys = ["source", "scenario_id", "frame_id"]
+    frame_keys = ["scenario_id", "frame_id"]
 
     if manifest.duplicated(frame_keys).any():
         raise ValueError("Duplicate frame keys in manifest")
 
     # Validate each frame.
     for row in manifest.itertuples(index=False):
-        frame_key = f"{row.source}/{row.scenario_id}/{row.frame_id}"
+        frame_key = f"{row.scenario_id}/{row.frame_id}"
         images = {}
 
         for modality in ("rgb", "depth", "semantic", "mask"):
@@ -216,12 +199,7 @@ def validate_manifest(
 
         actual_paths = {
             str(path.relative_to(data_root))
-            for dataset_dir in data_root.iterdir()
-            if dataset_dir.is_dir()
-            and (
-                "static" in dataset_dir.name.lower()
-                or "normality" in dataset_dir.name.lower()
-            )
+            for dataset_dir in _archive_dirs(data_root)
             for scenario_dir in dataset_dir.glob("Scenario_*")
             if scenario_dir.is_dir()
             for path in scenario_dir.glob(pattern)

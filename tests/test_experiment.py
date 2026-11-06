@@ -7,32 +7,32 @@ from roadguard.training.experiment import load_lofo_fold, make_loaders
 
 def sample_fold():
     rows = []
-    for source, family, scenario, split in [
-        ("static", "special", "s1", "test"),
-        ("static", "home", "s2", "train"),
-        ("static", "home", "s3", "val"),
-        ("normality", "normality", "n1", "train"),
-        ("normality", "normality", "n2", "val"),
-        ("normality", "normality", "n3", "test"),
+    for family, obj, scenario, split in [
+        ("special", "naga", "s1", "test"),
+        ("special", "ufo", "s2", "test"),
+        ("home", "box", "s3", "train"),
+        ("home", "chair", "s4", "val"),
+        ("animal", "wolf", "s5", "train"),
+        ("animal", "deer", "s6", "val"),
     ]:
-        rows.append(dict(source=source, anomaly_family=family, scenario_id=scenario,
+        rows.append(dict(anomaly_family=family, anomaly_object=obj, scenario_id=scenario,
                          frame_id="0", split=split, rgb_path="r.png",
                          depth_path="d.png", mask_path="m.png"))
     return pd.DataFrame(rows)
 
 
-def test_fold_keeps_normality_and_special(tmp_path):
+def test_fold_loads_unseen_family_as_test(tmp_path):
     path = tmp_path / "special.csv"
     sample_fold().to_csv(path, index=False)
     parts = load_lofo_fold(path, "special")
     assert {k: len(v) for k, v in parts.items()} == {"train": 2, "val": 2, "test": 2}
-    assert set(parts["test"]["source"]) == {"static", "normality"}
+    assert set(parts["test"]["anomaly_family"]) == {"special"}
 
 
 def test_fold_rejects_scenario_leakage(tmp_path):
     fold = sample_fold()
-    fold.loc[1, "scenario_id"] = "s3"
-    fold.loc[1, "frame_id"] = "1"
+    fold.loc[2, "scenario_id"] = "s4"
+    fold.loc[2, "frame_id"] = "1"
     path = tmp_path / "special.csv"
     fold.to_csv(path, index=False)
     with pytest.raises(ValueError, match="Scenario leakage"):
@@ -45,6 +45,15 @@ def test_fold_rejects_heldout_in_training(tmp_path):
     path = tmp_path / "special.csv"
     fold.to_csv(path, index=False)
     with pytest.raises(ValueError, match="Held-out family"):
+        load_lofo_fold(path, "special")
+
+
+def test_fold_rejects_object_leakage(tmp_path):
+    fold = sample_fold()
+    fold.loc[3, "anomaly_object"] = "box"            # validation object also used in training
+    path = tmp_path / "special.csv"
+    fold.to_csv(path, index=False)
+    with pytest.raises(ValueError, match="object leakage"):
         load_lofo_fold(path, "special")
 
 

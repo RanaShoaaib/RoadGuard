@@ -1,0 +1,19 @@
+# Data sources for Notebook 1 (01_data_preparation.ipynb).
+#
+# Every archive listed here is streamed from Zenodo (no raw archive is stored), turned into one package on
+# Drive (towns/<name>.tar + manifest + sidecar), and included in the LOFO splits.
+# To add a town: append one line with its name and the Zenodo record id (the number in the record URL),
+# or give `url:` (optionally with `md5:`) instead. Only ANOVOX *Static* archives are accepted.
+# Already prepared archives are skipped on rerun; delete an archive's files under towns/ to rebuild it.
+
+anomaly_ids: [29, 30, 31, 32, 33, 34, 100]   # semantic label ids that count as anomaly pixels
+
+splits:
+  seed: 42
+  val_frac: 0.2              # share of each training family's scenarios held out as validation OBJECTS
+  min_family_scenarios: 8    # families with fewer scenarios are always train (too small to be a test fold)
+
+archives:
+  - {name: Town03, zenodo: "10886684"}
+  - {name: Town04, zenodo: "10886364"}
+  - {name: Town06, zenodo: "10882557"}

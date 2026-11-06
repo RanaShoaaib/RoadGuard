@@ -13,3 +13,4 @@ torch==2.14.1
 torchvision==0.29.1
 tqdm==4.70.1
 transformers==5.20.1
+requests==2.34.2

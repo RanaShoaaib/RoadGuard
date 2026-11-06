@@ -55,11 +55,11 @@ def test_build_master_manifest_discovers_rgb_depth(tmp_path):
     }])
 
     scenario_metadata = pd.DataFrame([{
-        "source": "static",
         "scenario_id": "abc",
         "town": "Town04",
         "anomaly_family": "home",
         "anomaly_blueprint": "static.prop.o_box_home",
+        "anomaly_object": "box",
     }])
 
     result = build_master_manifest(
@@ -72,7 +72,7 @@ def test_build_master_manifest_discovers_rgb_depth(tmp_path):
 
     row = result.iloc[0]
 
-    assert row["source"] == "static"
+    assert "source" not in result.columns
     assert row["scenario_id"] == "abc"
     assert row["frame_id"] == "100"
 
@@ -87,6 +87,7 @@ def test_build_master_manifest_discovers_rgb_depth(tmp_path):
     assert row["town"] == "Town04"
     assert row["anomaly_family"] == "home"
     assert row["anomaly_blueprint"] == "static.prop.o_box_home"
+    assert row["anomaly_object"] == "box"
 
 
 
@@ -122,11 +123,11 @@ def test_build_master_manifest_rejects_missing_scenario_metadata(tmp_path):
     }])
 
     scenario_metadata = pd.DataFrame([{
-        "source": "static",
         "scenario_id": "different_scenario",
         "town": "Town04",
         "anomaly_family": "home",
         "anomaly_blueprint": "static.prop.o_box_home",
+        "anomaly_object": "box",
     }])
 
     with pytest.raises(ValueError, match="Missing scenario metadata"):
@@ -217,7 +218,6 @@ def valid_manifest_data(tmp_path):
         Image.fromarray(array).save(paths[modality])
 
     manifest = pd.DataFrame([{
-        "source": "static",
         "scenario_id": "abc",
         "frame_id": "100",
         "rgb_path": str(paths["rgb"].relative_to(data_root)),

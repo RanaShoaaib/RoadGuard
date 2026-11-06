@@ -32,7 +32,7 @@ def test_confusion_counts_and_overlap():
     assert result["recall"] == pytest.approx(1)
 
 
-def test_normality_false_positives_contribute_to_global_metrics():
+def test_empty_frame_false_positives_contribute_to_global_metrics():
     metric = SegmentationMetrics(from_logits=False)
     metric.update(*tensors([0.9, 0.1], [1, 0]))
     metric.update(*tensors([0.8, 0.2], [0, 0]))
