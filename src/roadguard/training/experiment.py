@@ -64,7 +64,9 @@ def make_loaders(parts: dict[str, pd.DataFrame], data_root: str | Path, config: 
                  *, teacher_train: bool = False) -> dict[str, DataLoader]:
     """Train loader draws scenario-balanced; val/test are deterministic.
 
-    Teacher training gets depth perturbations; other roles use clean depth.
+    Teacher training gets depth perturbations; other roles use clean depth. Every call returns
+    loaders in the same initial random state, so call it once per role: baseline and student
+    then see the identical sequence of training frames and augmentations.
     """
     size = tuple(config["data"]["image_size"])
     depth_args = config["teacher"] if teacher_train else {}
@@ -79,7 +81,11 @@ def make_loaders(parts: dict[str, pd.DataFrame], data_root: str | Path, config: 
         if split == "train":
             sampler = make_scenario_balanced_sampler(
                 parts["train"], config["training"]["pos_share_within"], seed=config["experiment"]["seed"])
-            loaders[split] = DataLoader(dataset, sampler=sampler, drop_last=True, **common)
+            # A private generator seeds the worker processes, so the augmentation stream does not
+            # depend on how much global randomness earlier roles consumed.
+            generator = torch.Generator().manual_seed(config["experiment"]["seed"])
+            loaders[split] = DataLoader(dataset, sampler=sampler, drop_last=True,
+                                        generator=generator, **common)
         else:
             loaders[split] = DataLoader(dataset, shuffle=False, **common)
     if len(loaders["train"]) == 0:
@@ -165,7 +171,8 @@ def run_experiment(config: str | Path | dict, fold_path: str | Path, data_root: 
     Layout: <output_root>/<name>/<family>/seed_<seed>/<role>/{best.pt,last.pt,history.json,
     test_scenarios*.csv,val_scenarios*.csv} plus config.json and report.json. ``config`` is a YAML
     path or an already-built dictionary (it is validated either way). Roles run in the order
-    teacher -> baseline -> student; the baseline and student start from identical RGB weights.
+    teacher -> baseline -> student; the baseline and student start from identical RGB weights and are
+    trained on identical sample sequences, so their difference reflects distillation alone.
     """
     config = validate_config(config) if isinstance(config, dict) else load_config(config)
     seed = config["experiment"]["seed"]
@@ -182,8 +189,6 @@ def run_experiment(config: str | Path | dict, fold_path: str | Path, data_root: 
                     for k, v in parts.items()}, indent=2), encoding="utf-8")
     device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
     amp = config["training"]["amp"]
-    loaders = {True: make_loaders(parts, data_root, config, teacher_train=True),
-               False: make_loaders(parts, data_root, config, teacher_train=False)}
     seed_everything(seed)
     rgb_initial = deepcopy(_build_model(config, 3).state_dict())
 
@@ -200,7 +205,7 @@ def run_experiment(config: str | Path | dict, fold_path: str | Path, data_root: 
             teacher = models["teacher"]
             load_checkpoint(run_dir / "teacher" / "best.pt", teacher, map_location=device)
             teacher.requires_grad_(False)
-        role_loaders = loaders[role == "teacher"]
+        role_loaders = make_loaders(parts, data_root, config, teacher_train=role == "teacher")
         _train_role(role, model, role_loaders, config, run_dir, device, teacher)
         models[role] = model
         report[role] = {}

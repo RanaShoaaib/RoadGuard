@@ -90,3 +90,16 @@ def test_too_few_training_frames_for_one_batch_rejected():
     parts = {k: sample_fold().query("split == @k") for k in ("train", "val", "test")}
     with pytest.raises(ValueError, match="batch"):
         make_loaders(parts, ".", config)
+
+
+def test_every_call_gives_identically_seeded_train_loader():
+    """Baseline and student each get a fresh loader and must draw the same frames in the same order."""
+    config = {"experiment": {"seed": 7}, "training": {"pos_share_within": 0.7},
+              "data": {"image_size": [32, 32], "batch_size": 1, "num_workers": 0}, "teacher": {}}
+    parts = {k: sample_fold().query("split == @k") for k in ("train", "val", "test")}
+    parts["train"] = pd.concat([parts["train"].assign(frame_id=str(i)) for i in range(40)])   # 80 frames
+    first = make_loaders(parts, ".", config)["train"]
+    second = make_loaders(parts, ".", config)["train"]
+    assert list(first.sampler) == list(second.sampler)
+    assert list(first.sampler) != list(first.sampler)         # one loader advances between epochs
+    assert first.generator.initial_seed() == second.generator.initial_seed() == 7

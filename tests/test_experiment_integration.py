@@ -12,7 +12,7 @@ from roadguard.training.experiment import run_experiment
 
 
 @pytest.mark.parametrize("architecture", ["unet", "segformer"])
-def test_complete_three_role_experiment(tmp_path, architecture):
+def test_complete_three_role_experiment(tmp_path, architecture, monkeypatch):
     if architecture == "segformer":
         pytest.importorskip("transformers")
     held_out_family = "special"
@@ -47,6 +47,9 @@ def test_complete_three_role_experiment(tmp_path, architecture):
             "anomaly_pixels": int((mask > 0).sum()),
             "depth_path": names[1], "mask_path": names[2],
         })
+    # More training frames (same images, new ids) so that two independent sample streams cannot
+    # coincide by chance.
+    rows += [{**row, "frame_id": f"copy{i}"} for row in list(rows) if row["split"] == "train" for i in range(12)]
     fold_path = tmp_path / "special.csv"
     pd.DataFrame(rows).to_csv(fold_path, index=False)
     config = {
@@ -63,6 +66,14 @@ def test_complete_three_role_experiment(tmp_path, architecture):
     config_path = tmp_path / "config.yaml"
     config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
 
+    from roadguard.training import experiment
+    real_train_role, drawn = experiment._train_role, {}
+
+    def recording_train_role(role, model, loaders, *args, **kwargs):
+        drawn[role] = [list(loaders["train"].sampler) for _ in range(2)]   # first two epochs' draws
+        return real_train_role(role, model, loaders, *args, **kwargs)
+
+    monkeypatch.setattr(experiment, "_train_role", recording_train_role)
     previous_threads = torch.get_num_threads()
     try:
         torch.set_num_threads(1)
@@ -84,6 +95,7 @@ def test_complete_three_role_experiment(tmp_path, architecture):
             test = results[role][which]["test"]
             assert 0 <= test["pixel_ap"] <= 1
             assert "at_thr_dice" in test and "empty_fpr_pixels" in test
+    assert drawn["baseline"] == drawn["student"]       # matched training samples for the comparison
     assert (run_dir / "report.json").is_file()
     assert (run_dir / "config.json").is_file()
     # The reports module reads the finished run back.

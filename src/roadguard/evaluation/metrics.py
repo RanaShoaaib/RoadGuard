@@ -198,13 +198,22 @@ class EvalAccumulator:
 
 
 def average_precision(scores: np.ndarray, labels: np.ndarray) -> float:
+    """Average precision with tied scores grouped at one threshold (matches scikit-learn).
+
+    Equal scores are accepted or rejected together, so the result does not depend on the order
+    in which tied items happen to arrive (bf16 inference produces many exact ties).
+    """
     scores, labels = np.asarray(scores, float), np.asarray(labels).astype(bool)
-    if labels.sum() == 0:
+    positives = labels.sum()
+    if positives == 0:
         return float("nan")
     order = np.argsort(-scores, kind="mergesort")
-    tp = np.cumsum(labels[order])
-    precision = tp / np.arange(1, len(labels) + 1)
-    return float(precision[labels[order]].sum() / labels.sum())
+    scores, labels = scores[order], labels[order]
+    last_of_group = np.r_[np.flatnonzero(np.diff(scores)), len(scores) - 1]
+    tp = np.cumsum(labels)[last_of_group]
+    precision = tp / (last_of_group + 1)
+    recall = tp / positives
+    return float(np.sum(np.diff(np.r_[0.0, recall]) * precision))
 
 
 def roc_auc(scores: np.ndarray, labels: np.ndarray) -> float:

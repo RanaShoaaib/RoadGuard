@@ -66,3 +66,15 @@ def test_summarize_reports_threshold_free_and_thresholded_keys():
     assert out["macro_scenario_ap"] > 0.99 and out["pixel_ap"] > 0.99
     assert out["at_thr_dice"] == pytest.approx(1.0) and "empty_fpr_pixels" in out and "frame_auroc" in out
     assert "at_thr_dice" not in summarize(acc)
+
+
+def test_average_precision_groups_tied_scores():
+    from roadguard.evaluation.metrics import average_precision
+    tied = np.zeros(2)
+    assert average_precision(tied, np.array([1, 0])) == pytest.approx(0.5)
+    assert average_precision(tied, np.array([0, 1])) == pytest.approx(0.5)   # order must not matter
+    rng = np.random.default_rng(3)
+    y = rng.random(5000) < 0.1
+    z = np.round(rng.normal(size=5000) + 1.5 * y, 1)                          # many exact ties
+    assert average_precision(z, y) == pytest.approx(average_precision_score(y, z), abs=1e-9)
+    assert np.isnan(average_precision(z, np.zeros(5000)))
