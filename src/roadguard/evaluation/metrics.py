@@ -1,104 +1,231 @@
-"""Streaming, dataset-level pixel metrics for binary anomaly segmentation.
+"""Streaming evaluation metrics for binary anomaly segmentation, computed in LOGIT space.
 
-AUROC and average precision (AUPRC) are approximated using a fixed-width
-probability histogram to avoid storing every pixel of a large LOFO fold.
-Thresholded confusion counts (and derived metrics) are exact.
+Scores are binned by logit, not probability. A probability histogram lumps every pixel with
+p < 1/4096 into one bin, so scenarios where the model is confidently "no" everywhere collapse to
+AUROC == 0.5 whatever the true ranking. Logit bins keep resolution in that region.
+
+Reported at three levels: pooled over all pixels, per scenario (within the scenario, so its
+anomaly-free frames supply the false-positive pressure) and per frame. ``empty`` pools the pixels
+of frames without any anomaly to report the false-positive rate there at a fixed threshold.
+All histograms are exact counts, so results are deterministic and mergeable.
 """
 from __future__ import annotations
+
+from dataclasses import dataclass, field
 
 import numpy as np
 import torch
 
+LOGIT_LO, LOGIT_HI, NUM_BINS = -24.0, 24.0, 12288  # bin width ~0.0039 logits
 
-class SegmentationMetrics:
-    """Accumulate pixel metrics over batches, including frames without any anomaly.
 
-    Args:
-        threshold: Pixels with sigmoid(logit) >= threshold are predicted positive.
-        num_bins: Number of equally spaced probability bins for AUROC/AUPRC.
-        from_logits: If true, inputs are raw model logits; otherwise probabilities.
+def _trapezoid(y, x):
+    fn = getattr(np, "trapezoid", None) or np.trapz
+    return float(fn(y, x))
 
-    ``compute`` returns NaN for AUROC/AUPRC when ground truth has one class.
-    Dice and IoU use zero_division=1 when both masks and predictions are empty;
-    precision and recall use zero_division=0 when their denominators are zero.
-    """
 
-    def __init__(self, threshold: float = 0.5, num_bins: int = 4096,
-                 from_logits: bool = True) -> None:
-        if not 0.0 < threshold < 1.0:
-            raise ValueError("threshold must be strictly between 0 and 1")
-        if isinstance(num_bins, bool) or not isinstance(num_bins, int) or num_bins < 2:
-            raise ValueError("num_bins must be an integer >= 2")
-        self.threshold = float(threshold)
-        self.num_bins = num_bins
-        self.from_logits = bool(from_logits)
-        self.reset()
+class LogitCurve:
+    """Histogram of logits for positive and negative pixels."""
 
-    def reset(self) -> None:
-        self.tp = self.fp = self.fn = self.tn = 0
-        self.positive_hist = np.zeros(self.num_bins, dtype=np.int64)
-        self.negative_hist = np.zeros(self.num_bins, dtype=np.int64)
+    def __init__(self, lo: float = LOGIT_LO, hi: float = LOGIT_HI, num_bins: int = NUM_BINS):
+        self.lo, self.hi, self.nb = lo, hi, num_bins
+        self.pos = np.zeros(num_bins, dtype=np.int64)
+        self.neg = np.zeros(num_bins, dtype=np.int64)
+
+    # -- accumulation ---------------------------------------------------------
+    def _bins(self, logits: torch.Tensor) -> torch.Tensor:
+        x = logits.float().clamp(self.lo, self.hi - 1e-4)
+        return ((x - self.lo) / (self.hi - self.lo) * self.nb).long()
 
     @torch.no_grad()
-    def update(self, predictions: torch.Tensor, targets: torch.Tensor) -> None:
-        if predictions.shape != targets.shape or predictions.ndim != 4 or predictions.shape[1] != 1:
-            raise ValueError("predictions and targets must have matching [B, 1, H, W] shapes")
-        if not torch.isfinite(predictions).all() or not torch.isfinite(targets).all():
-            raise ValueError("predictions and targets must be finite")
-        if not torch.all((targets == 0) | (targets == 1)):
-            raise ValueError("targets must contain only 0 and 1")
-        if not self.from_logits and not torch.all((predictions >= 0) & (predictions <= 1)):
-            raise ValueError("probabilities must be in [0, 1]")
+    def update(self, logits: torch.Tensor, targets: torch.Tensor) -> None:
+        """logits/targets: any matching shape. Targets are thresholded at 0.5."""
+        logits = torch.as_tensor(logits).reshape(-1)
+        t = torch.as_tensor(targets, device=logits.device).reshape(-1) > 0.5
+        b = self._bins(logits)
+        self.pos += torch.bincount(b[t], minlength=self.nb).cpu().numpy().astype(np.int64)
+        self.neg += torch.bincount(b[~t], minlength=self.nb).cpu().numpy().astype(np.int64)
 
-        probabilities = predictions.sigmoid() if self.from_logits else predictions
-        probs = probabilities.detach().reshape(-1).to("cpu", dtype=torch.float64).numpy()
-        truth = targets.detach().reshape(-1).to("cpu", dtype=torch.uint8).numpy().astype(bool)
-        positive = probs >= self.threshold
-        self.tp += int(np.count_nonzero(positive & truth))
-        self.fp += int(np.count_nonzero(positive & ~truth))
-        self.fn += int(np.count_nonzero(~positive & truth))
-        self.tn += int(np.count_nonzero(~positive & ~truth))
+    def merged(self, other: "LogitCurve") -> "LogitCurve":
+        out = LogitCurve(self.lo, self.hi, self.nb)
+        out.pos, out.neg = self.pos + other.pos, self.neg + other.neg
+        return out
 
-        # The last bin includes p=1.0; other bins are [left, right).
-        indices = np.minimum((probs * self.num_bins).astype(np.int64), self.num_bins - 1)
-        self.positive_hist += np.bincount(indices[truth], minlength=self.num_bins)
-        self.negative_hist += np.bincount(indices[~truth], minlength=self.num_bins)
+    # -- derived quantities ---------------------------------------------------
+    def _sweep(self):
+        tp = np.cumsum(self.pos[::-1]).astype(np.float64)   # threshold high -> low
+        fp = np.cumsum(self.neg[::-1]).astype(np.float64)
+        P, N = float(self.pos.sum()), float(self.neg.sum())
+        return tp, fp, P, N
 
-    def compute(self) -> dict[str, float | int]:
-        tp, fp, fn, tn = self.tp, self.fp, self.fn, self.tn
-        total = tp + fp + fn + tn
+    def threshold_of(self, k: int) -> float:
+        """Logit threshold represented by sweep index k (lower edge of that bin)."""
+        width = (self.hi - self.lo) / self.nb
+        return self.hi - (k + 1) * width
+
+    def quantile(self, which: str, q: float) -> float:
+        """Logit quantile of the positive ('pos') or negative ('neg') pixels."""
+        h = self.pos if which == "pos" else self.neg
+        total = h.sum()
         if total == 0:
-            raise ValueError("No pixels accumulated; call update first")
-        dice_denom = 2 * tp + fp + fn
-        iou_denom = tp + fp + fn
-        dice = (2 * tp / dice_denom) if dice_denom else 1.0
-        iou = (tp / iou_denom) if iou_denom else 1.0
-        precision = tp / (tp + fp) if (tp + fp) else 0.0
-        recall = tp / (tp + fn) if (tp + fn) else 0.0
+            return float("nan")
+        k = int(np.searchsorted(np.cumsum(h), q * total))
+        return self.lo + (min(k, self.nb - 1) + 0.5) * (self.hi - self.lo) / self.nb
 
-        n_pos = int(self.positive_hist.sum())
-        n_neg = int(self.negative_hist.sum())
-        auroc = float("nan")
-        auprc = float("nan")
-        if n_pos and n_neg:
-            # Sweep bins from high to low predicted probability.
-            cum_tp = np.cumsum(self.positive_hist[::-1], dtype=np.int64)
-            cum_fp = np.cumsum(self.negative_hist[::-1], dtype=np.int64)
-            tpr = np.r_[0.0, cum_tp / n_pos]
-            fpr = np.r_[0.0, cum_fp / n_neg]
-            auroc = float(np.trapezoid(tpr, fpr))
-            # Step-wise precision-recall area = average precision.
-            pr_precision = np.divide(cum_tp, cum_tp + cum_fp,
-                                     out=np.zeros_like(cum_tp, dtype=float),
-                                     where=(cum_tp + cum_fp) != 0)
-            recall_steps = np.diff(tpr)
-            auprc = float(np.sum(recall_steps * pr_precision))
+    def auroc(self) -> float:
+        tp, fp, P, N = self._sweep()
+        if P == 0 or N == 0:
+            return float("nan")
+        return _trapezoid(np.r_[0.0, tp / P, 1.0], np.r_[0.0, fp / N, 1.0])
 
+    def ap(self) -> float:
+        tp, fp, P, N = self._sweep()
+        if P == 0:
+            return float("nan")
+        recall = tp / P
+        precision = tp / np.maximum(tp + fp, 1)
+        return float(np.sum(np.diff(np.r_[0.0, recall]) * precision))
+
+    def best_threshold(self, criterion: str = "dice") -> tuple[float, dict]:
+        """Threshold (logit) maximising Dice or IoU on this curve, plus its metrics."""
+        tp, fp, P, N = self._sweep()
+        if P == 0:
+            return float("nan"), {}
+        fn = P - tp
+        score = (2 * tp / np.maximum(2 * tp + fp + fn, 1) if criterion == "dice"
+                 else tp / np.maximum(tp + fp + fn, 1))
+        k = int(np.argmax(score))
+        return self.threshold_of(k), self.at_index(k)
+
+    def at_index(self, k: int) -> dict:
+        tp, fp, P, N = self._sweep()
+        tpk, fpk = tp[k], fp[k]
+        fnk = P - tpk
         return {
-            "pixel_auroc": auroc, "pixel_auprc": auprc,
-            "dice": float(dice), "iou": float(iou),
-            "precision": float(precision), "recall": float(recall),
-            "tp": tp, "fp": fp, "fn": fn, "tn": tn,
-            "positive_pixels": n_pos, "negative_pixels": n_neg,
-            "threshold": self.threshold, "num_bins": self.num_bins,
+            "threshold_logit": self.threshold_of(k),
+            "dice": float(2 * tpk / max(2 * tpk + fpk + fnk, 1)),
+            "iou": float(tpk / max(tpk + fpk + fnk, 1)),
+            "precision": float(tpk / max(tpk + fpk, 1)),
+            "recall": float(tpk / max(P, 1)),
+            "fpr": float(fpk / max(N, 1)),
+            "fp_pixels": int(fpk), "tp_pixels": int(tpk),
         }
+
+    def at_threshold(self, logit_threshold: float) -> dict:
+        """Exact-to-bin metrics when predicting positive for logit >= threshold."""
+        width = (self.hi - self.lo) / self.nb
+        k = int(np.clip(round((self.hi - logit_threshold) / width) - 1, 0, self.nb - 1))
+        return self.at_index(k)
+
+    def summary(self) -> dict:
+        thr, best = self.best_threshold("dice")
+        return {"ap": self.ap(), "auroc": self.auroc(),
+                "n_pos": int(self.pos.sum()), "n_neg": int(self.neg.sum()),
+                "best_dice": best.get("dice", float("nan")),
+                "best_thr_logit": thr}
+
+
+@dataclass
+class EvalAccumulator:
+    """Pooled + per-scenario + frame-level accumulators for one split.
+
+    Every scenario contains frames with and without the anomaly, so per-scenario AP is
+    computed within the scenario (its empty frames supply the false-positive pressure).
+    ``empty`` pools the pixels of frames that contain no anomaly at all, to report the
+    false-positive rate on anomaly-free frames at a fixed threshold.
+    """
+    pooled: LogitCurve = field(default_factory=LogitCurve)
+    empty: LogitCurve = field(default_factory=LogitCurve)
+    scen: dict = field(default_factory=dict)
+    frame_scores: list = field(default_factory=list)
+    frame_labels: list = field(default_factory=list)
+    frame_scen: list = field(default_factory=list)
+
+    @torch.no_grad()
+    def update(self, logits: torch.Tensor, masks: torch.Tensor, scenario_ids) -> None:
+        """logits/masks: [B,1,H,W] at the SAME resolution."""
+        for i, sid in enumerate(scenario_ids):
+            lg, mk = logits[i], masks[i]
+            has_anomaly = bool((mk > 0.5).any().item())
+            self.pooled.update(lg, mk)
+            self.scen.setdefault(sid, LogitCurve()).update(lg, mk)
+            if not has_anomaly:
+                self.empty.update(lg, mk)
+            self.frame_scores.append(float(lg.max().item()))
+            self.frame_labels.append(has_anomaly)
+            self.frame_scen.append(sid)
+
+    # -- reports --------------------------------------------------------------
+    def scenario_table(self, threshold_logit: float | None = None):
+        """Per-scenario metrics (AP/AUROC within the scenario)."""
+        import pandas as pd
+        rows = []
+        for sid, c in sorted(self.scen.items()):
+            row = {"scenario_id": sid, "gt_pixels": int(c.pos.sum())}
+            if c.pos.sum() > 0:
+                row.update(ap=c.ap(), auroc=c.auroc())
+                thr, best = c.best_threshold("dice")
+                row.update(best_dice=best["dice"], best_thr_logit=thr,
+                           pos_logit_median=c.quantile("pos", 0.5),
+                           pos_logit_p90=c.quantile("pos", 0.9),
+                           neg_logit_median=c.quantile("neg", 0.5),
+                           separation=c.quantile("pos", 0.5) - c.quantile("neg", 0.5))
+                if threshold_logit is not None:
+                    m = c.at_threshold(threshold_logit)  # within-scenario at a fixed thr
+                    row.update(dice_at_thr=m["dice"], recall_at_thr=m["recall"],
+                               precision_at_thr=m["precision"])
+            rows.append(row)
+        return pd.DataFrame(rows)
+
+    def frame_metrics(self) -> dict:
+        s, y = np.array(self.frame_scores), np.array(self.frame_labels)
+        return {"frame_ap": average_precision(s, y), "frame_auroc": roc_auc(s, y),
+                "frames": int(len(y)), "positive_frames": int(y.sum())}
+
+    def macro_scenario_ap(self) -> float:
+        t = self.scenario_table()
+        if t.empty or "ap" not in t:
+            return float("nan")
+        return float(t["ap"].dropna().mean())
+
+    def empty_frame_report(self, threshold_logit: float) -> dict:
+        """False-positive pixel rate on frames with no anomaly, at a fixed threshold."""
+        if self.empty.neg.sum() == 0:
+            return {"empty_fpr_pixels": float("nan"), "empty_fp_pixels": 0, "empty_pixels": 0}
+        m = self.empty.at_threshold(threshold_logit)
+        return {"empty_fpr_pixels": m["fpr"], "empty_fp_pixels": m["fp_pixels"],
+                "empty_pixels": int(self.empty.neg.sum())}
+
+
+def average_precision(scores: np.ndarray, labels: np.ndarray) -> float:
+    scores, labels = np.asarray(scores, float), np.asarray(labels).astype(bool)
+    if labels.sum() == 0:
+        return float("nan")
+    order = np.argsort(-scores, kind="mergesort")
+    tp = np.cumsum(labels[order])
+    precision = tp / np.arange(1, len(labels) + 1)
+    return float(precision[labels[order]].sum() / labels.sum())
+
+
+def roc_auc(scores: np.ndarray, labels: np.ndarray) -> float:
+    from scipy.stats import rankdata
+    scores, labels = np.asarray(scores, float), np.asarray(labels).astype(bool)
+    P, N = labels.sum(), (~labels).sum()
+    if P == 0 or N == 0:
+        return float("nan")
+    ranks = rankdata(scores)
+    return float((ranks[labels].sum() - P * (P + 1) / 2) / (P * N))
+
+
+def summarize(acc: EvalAccumulator, threshold_logit: float | None = None) -> dict:
+    """Flat metric dictionary for one split; threshold-dependent entries need ``threshold_logit``."""
+    s = acc.pooled.summary()
+    out = {"pixel_ap": s["ap"], "pixel_auroc": s["auroc"], "pixel_best_dice": s["best_dice"],
+           "pixel_best_thr_logit": s["best_thr_logit"], "macro_scenario_ap": acc.macro_scenario_ap()}
+    out.update(acc.frame_metrics())
+    if threshold_logit is not None:
+        out["threshold_logit"] = threshold_logit
+        out.update({f"at_thr_{k}": v for k, v in acc.pooled.at_threshold(threshold_logit).items()
+                    if k != "threshold_logit"})
+        out.update(acc.empty_frame_report(threshold_logit))
+    return out

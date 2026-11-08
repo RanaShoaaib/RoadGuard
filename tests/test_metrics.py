@@ -1,121 +1,68 @@
-"""Tests for streaming RoadGuard binary segmentation metrics."""
-import math
-
+"""Tests for logit-space evaluation metrics."""
+import numpy as np
+import pandas as pd
 import pytest
 import torch
+from sklearn.metrics import average_precision_score, roc_auc_score
 
-from roadguard.evaluation.metrics import SegmentationMetrics
-
-
-def tensors(scores, labels):
-    p = torch.tensor(scores, dtype=torch.float32).reshape(1, 1, 1, -1)
-    y = torch.tensor(labels, dtype=torch.float32).reshape(1, 1, 1, -1)
-    return p, y
+from roadguard.evaluation.metrics import EvalAccumulator, LogitCurve, summarize
 
 
-def test_perfect_predictions():
-    metric = SegmentationMetrics(from_logits=False)
-    metric.update(*tensors([0.1, 0.9, 0.2, 0.8], [0, 1, 0, 1]))
-    result = metric.compute()
-    for key in ("dice", "iou", "precision", "recall", "pixel_auroc", "pixel_auprc"):
-        assert result[key] == pytest.approx(1.0)
+def test_logit_curve_matches_sklearn():
+    rng = np.random.default_rng(0)
+    y = (rng.random(200_000) < 0.02)
+    z = rng.normal(size=y.size) * 2 - 3 + y * 2.0
+    c = LogitCurve(); c.update(torch.tensor(z), torch.tensor(y.astype(float)))
+    assert abs(c.ap() - average_precision_score(y, z)) < 5e-3
+    assert abs(c.auroc() - roc_auc_score(y, z)) < 5e-3
+
+def test_threshold_metrics_consistent():
+    z = torch.cat([torch.full((10,), 3.0), torch.full((990,), -3.0)])
+    y = torch.cat([torch.ones(10), torch.zeros(990)])
+    c = LogitCurve(); c.update(z, y)
+    m = c.at_threshold(0.0)
+    assert m["dice"] == pytest.approx(1.0) and m["fp_pixels"] == 0
+
+def test_scenario_table_is_within_scenario_and_empty_frames_are_pooled():
+    acc = EvalAccumulator()
+    good = torch.full((1, 1, 8, 8), -5.0); good[..., :2, :2] = 5.0
+    gt = torch.zeros(1, 1, 8, 8); gt[..., :2, :2] = 1
+    acc.update(good, gt, ["a"])
+    acc.update(torch.full((1, 1, 8, 8), -5.0), torch.zeros(1, 1, 8, 8), ["a"])      # empty frame of a
+    acc.update(torch.full((1, 1, 8, 8), 4.0), torch.zeros(1, 1, 8, 8), ["b"])       # empty frame, false alarm
+    t = acc.scenario_table().set_index("scenario_id")
+    assert t.loc["a", "ap"] > 0.99                       # within-scenario: the empty frame costs nothing here
+    assert t.loc["b", "gt_pixels"] == 0 and pd.isna(t.loc["b", "ap"])   # no positives: no AP
+    rep = acc.empty_frame_report(0.0)
+    assert rep["empty_pixels"] == 128 and rep["empty_fp_pixels"] == 64 and rep["empty_fpr_pixels"] == pytest.approx(0.5)
+
+def test_quantile_and_scenario_table_columns():
+    acc = EvalAccumulator()
+    z = torch.full((1, 1, 8, 8), -9.0); z[..., :2, :2] = -6.0
+    y = torch.zeros(1, 1, 8, 8); y[..., :2, :2] = 1
+    acc.update(z, y, ["a"])
+    t = acc.scenario_table()
+    assert t.loc[0, "separation"] == pytest.approx(3.0, abs=0.05)        # signal visible even at p~1e-3
+    assert t.loc[0, "ap"] > 0.99
 
 
-def test_confusion_counts_and_overlap():
-    metric = SegmentationMetrics(from_logits=False)
-    metric.update(*tensors([0.9, 0.8, 0.7, 0.1], [1, 0, 1, 0]))
-    result = metric.compute()
-    assert (result["tp"], result["fp"], result["fn"], result["tn"]) == (2, 1, 0, 1)
-    assert result["dice"] == pytest.approx(0.8)
-    assert result["iou"] == pytest.approx(2 / 3)
-    assert result["precision"] == pytest.approx(2 / 3)
-    assert result["recall"] == pytest.approx(1)
+
+def test_logit_bins_do_not_collapse_for_tiny_probabilities():
+    """Scores far below p=1e-4 (a probability histogram would put them all in one bin) still rank."""
+    rng = np.random.default_rng(1)
+    y = (rng.random(100_000) < 0.05)
+    z = np.where(y, -11.0, -13.0) + rng.normal(size=y.size) * 0.3
+    t = torch.tensor(y.astype(np.float32))[None, None, :, None]
+    curve = LogitCurve(); curve.update(torch.tensor(z.astype(np.float32))[None, None, :, None], t)
+    assert curve.auroc() > 0.99
 
 
-def test_empty_frame_false_positives_contribute_to_global_metrics():
-    metric = SegmentationMetrics(from_logits=False)
-    metric.update(*tensors([0.9, 0.1], [1, 0]))
-    metric.update(*tensors([0.8, 0.2], [0, 0]))
-    result = metric.compute()
-    assert result["fp"] == 1
-    assert result["dice"] == pytest.approx(2 / 3)
-    assert result["positive_pixels"] == 1
-    assert result["negative_pixels"] == 3
-
-
-def test_all_background_with_no_predictions():
-    metric = SegmentationMetrics(from_logits=False)
-    metric.update(*tensors([0.1, 0.2], [0, 0]))
-    result = metric.compute()
-    assert result["dice"] == result["iou"] == 1.0
-    assert result["precision"] == result["recall"] == 0.0
-    assert math.isnan(result["pixel_auroc"])
-    assert math.isnan(result["pixel_auprc"])
-
-
-def test_all_positive_ground_truth_undefined_curves():
-    metric = SegmentationMetrics(from_logits=False)
-    metric.update(*tensors([0.9, 0.2], [1, 1]))
-    assert math.isnan(metric.compute()["pixel_auroc"])
-    assert math.isnan(metric.compute()["pixel_auprc"])
-
-
-def test_threshold_is_inclusive():
-    metric = SegmentationMetrics(from_logits=False, threshold=0.5)
-    metric.update(*tensors([0.5, 0.49], [1, 0]))
-    assert metric.compute()["tp"] == 1
-    assert metric.compute()["tn"] == 1
-
-
-def test_logits_are_sigmoided():
-    metric = SegmentationMetrics(from_logits=True)
-    metric.update(*tensors([-3, 3], [0, 1]))
-    assert metric.compute()["dice"] == 1.0
-
-
-def test_updates_equivalent_to_combined_batch():
-    separate = SegmentationMetrics(from_logits=False)
-    combined = SegmentationMetrics(from_logits=False)
-    a = tensors([0.1, 0.9], [0, 1])
-    b = tensors([0.7, 0.4], [0, 1])
-    separate.update(*a)
-    separate.update(*b)
-    combined.update(torch.cat([a[0], b[0]]), torch.cat([a[1], b[1]]))
-    assert separate.compute() == combined.compute()
-
-
-def test_reset():
-    metric = SegmentationMetrics(from_logits=False)
-    metric.update(*tensors([0.1, 0.9], [0, 1]))
-    metric.reset()
-    with pytest.raises(ValueError, match="No pixels"):
-        metric.compute()
-
-
-@pytest.mark.parametrize("scores,labels", [([float("nan")], [0]), ([0.2], [0.5]), ([1.2], [1])])
-def test_reject_invalid_data(scores, labels):
-    metric = SegmentationMetrics(from_logits=False)
-    with pytest.raises(ValueError):
-        metric.update(*tensors(scores, labels))
-
-
-def test_reject_invalid_shapes():
-    metric = SegmentationMetrics()
-    with pytest.raises(ValueError, match="matching"):
-        metric.update(torch.zeros(1, 1, 2, 2), torch.zeros(1, 1, 2, 3))
-
-
-def test_reject_invalid_configuration():
-    with pytest.raises(ValueError):
-        SegmentationMetrics(threshold=1.0)
-    with pytest.raises(ValueError):
-        SegmentationMetrics(num_bins=1)
-
-
-def test_histogram_approximation_is_reasonable():
-    # All probabilities are far enough apart to occupy separate bins.
-    metric = SegmentationMetrics(from_logits=False, num_bins=4096)
-    metric.update(*tensors([0.1, 0.4, 0.35, 0.8], [0, 0, 1, 1]))
-    result = metric.compute()
-    assert result["pixel_auroc"] == pytest.approx(0.75)
-    assert result["pixel_auprc"] == pytest.approx((1.0 + 2 / 3) / 2)
+def test_summarize_reports_threshold_free_and_thresholded_keys():
+    acc = EvalAccumulator()
+    z = torch.full((1, 1, 8, 8), -5.0); z[..., :2, :2] = 5.0
+    y = torch.zeros(1, 1, 8, 8); y[..., :2, :2] = 1
+    acc.update(z, y, ["a"])
+    out = summarize(acc, threshold_logit=0.0)
+    assert out["macro_scenario_ap"] > 0.99 and out["pixel_ap"] > 0.99
+    assert out["at_thr_dice"] == pytest.approx(1.0) and "empty_fpr_pixels" in out and "frame_auroc" in out
+    assert "at_thr_dice" not in summarize(acc)

@@ -11,8 +11,11 @@ from PIL import Image
 from roadguard.training.experiment import run_experiment
 
 
-@pytest.mark.parametrize("held_out_family", ["special"])
-def test_complete_three_role_experiment(tmp_path, held_out_family):
+@pytest.mark.parametrize("architecture", ["unet", "segformer"])
+def test_complete_three_role_experiment(tmp_path, architecture):
+    if architecture == "segformer":
+        pytest.importorskip("transformers")
+    held_out_family = "special"
     """Exercise actual images, CARLA depth decoding, training, KD, checkpoints, evaluation."""
     data_root = tmp_path / "data"
     data_root.mkdir()
@@ -41,21 +44,21 @@ def test_complete_three_role_experiment(tmp_path, held_out_family):
         rows.append({
             "anomaly_family": family, "anomaly_object": obj, "scenario_id": scenario,
             "frame_id": "0", "split": split, "rgb_path": names[0],
+            "anomaly_pixels": int((mask > 0).sum()),
             "depth_path": names[1], "mask_path": names[2],
         })
     fold_path = tmp_path / "special.csv"
     pd.DataFrame(rows).to_csv(fold_path, index=False)
     config = {
         "experiment": {"name": "smoke", "seed": 42, "lofo_family": held_out_family},
-        "model": {"architecture": "unet", "base_channels": 2, "pretrained": False},
+        "model": {"architecture": architecture, "base_channels": 2, "pretrained": False},
         "data": {"image_size": [32, 32], "batch_size": 2, "num_workers": 0},
         "teacher": {"depth_noise_std_m": 1.0,
                     "depth_dropout_probability": 1.0,
                     "depth_dropout_fraction": 0.2},
         "student": {"kd_weight": 0.5, "temperature": 2.0},
-        "training": {"epochs": 1, "optimizer": "adamw", "learning_rate": 1e-3,
-                     "weight_decay": 0.0, "supervised_loss": "bce_dice"},
-        "evaluation": {"threshold": 0.5},
+        "training": {"epochs": 2, "optimizer": "adamw", "learning_rate": 1e-3,
+                     "weight_decay": 0.0, "select_min_frac": 0.0, "amp": False},
     }
     config_path = tmp_path / "config.yaml"
     config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
@@ -69,19 +72,27 @@ def test_complete_three_role_experiment(tmp_path, held_out_family):
         torch.set_num_threads(previous_threads)
 
     run_dir = tmp_path / "outputs" / "smoke" / held_out_family / "seed_42"
-    assert set(results) == {"teacher", "baseline", "student"}
-    for role in results:
+    assert set(results) == {"config", "teacher", "baseline", "student"}
+    for role in ("teacher", "baseline", "student"):
         role_dir = run_dir / role
-        assert (role_dir / "best.pt").is_file()
-        assert (role_dir / "latest.pt").is_file()
+        for name in ("best.pt", "last.pt", "test_scenarios.csv", "test_scenarios_last.csv",
+                     "val_scenarios.csv"):
+            assert (role_dir / name).is_file()
         history = json.loads((role_dir / "history.json").read_text())
-        assert len(history) == 1
-        assert "val_supervised_loss" in history[0]
-        assert results[role]["positive_pixels"] > 0
-        assert results[role]["negative_pixels"] > 0
-        assert 0 <= results[role]["pixel_auprc"] <= 1
-    assert (run_dir / "metrics.json").is_file()
+        assert len(history) == 2 and "val_macro_ap" in history[0]
+        for which in ("selected", "last"):
+            test = results[role][which]["test"]
+            assert 0 <= test["pixel_ap"] <= 1
+            assert "at_thr_dice" in test and "empty_fpr_pixels" in test
+    assert (run_dir / "report.json").is_file()
     assert (run_dir / "config.json").is_file()
+    # The reports module reads the finished run back.
+    from roadguard.evaluation.reports import aggregate, fold_average, load_reports, per_scenario_ap
+    table = load_reports(tmp_path / "outputs", ["smoke"], [held_out_family], [42],
+                         roles=("teacher", "baseline", "student"))
+    assert len(table) == 6 and set(table["role"]) == {"teacher", "baseline", "student"}
+    assert len(aggregate(table)) == 6 and len(fold_average(table)) == 6
+    assert per_scenario_ap(tmp_path / "outputs", ["smoke"], held_out_family, [42], role="student").shape[1] == 1
     counts = json.loads((run_dir / "partition_counts.json").read_text())
     assert {key: counts[key]["scenarios"] for key in counts} == {
         "train": 2, "val": 2, "test": 2,

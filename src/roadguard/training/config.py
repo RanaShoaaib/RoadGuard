@@ -9,6 +9,22 @@ import math
 import yaml
 
 
+ROLES = ("teacher", "baseline", "student")
+
+# The recipe settled by the notebook-04 ladder; every key can be overridden in the YAML.
+TRAINING_DEFAULTS = {
+    "warmup_frac": 0.05,      # linear LR warmup, then cosine decay
+    "grad_clip": 1.0,
+    "ema_decay": 0.998,       # 0 disables EMA weights
+    "smooth_window": 3,       # epochs averaged when picking the checkpoint
+    "select_min_frac": 0.5,   # ignore the high-LR first half of training when picking
+    "pos_share_within": 0.7,  # share of a scenario's draws taken from frames showing the anomaly
+    "focal_alpha": 0.25,      # weight of positive pixels in the focal term (negatives get 1 - alpha)
+    "focal_gamma": 2.0,
+    "amp": True,              # bf16 autocast, CUDA only
+}
+
+
 def _mapping(value: Any, label: str) -> dict:
     if not isinstance(value, dict):
         raise ValueError(f"{label} must be a mapping")
@@ -38,7 +54,7 @@ def _integer(value: Any, label: str, minimum: int = 1) -> int:
 def validate_config(raw: dict[str, Any]) -> dict[str, Any]:
     """Return a validated, independent configuration dictionary."""
     config = deepcopy(_mapping(raw, "configuration"))
-    sections = {"experiment", "model", "data", "teacher", "student", "training", "evaluation"}
+    sections = {"experiment", "model", "data", "teacher", "student", "training"}
     _keys(config, sections, "configuration")
     missing = sections - set(config)
     if missing:
@@ -47,11 +63,17 @@ def validate_config(raw: dict[str, Any]) -> dict[str, Any]:
         _mapping(config[name], name)
 
     e = config["experiment"]
-    _keys(e, {"name", "seed", "lofo_family"}, "experiment")
+    _keys(e, {"name", "seed", "lofo_family", "roles"}, "experiment")
     for field in ("name", "lofo_family"):
         if not isinstance(e.get(field), str) or not e[field].strip():
             raise ValueError(f"experiment.{field} must be a nonempty string")
     _integer(e.get("seed"), "experiment.seed", 0)
+    roles = e.setdefault("roles", list(ROLES))
+    if not isinstance(roles, list) or not roles or not set(roles) <= set(ROLES) or len(set(roles)) != len(roles):
+        raise ValueError(f"experiment.roles must be a nonempty subset of {list(ROLES)}")
+    if "student" in roles and "teacher" not in roles:
+        raise ValueError("experiment.roles: a student needs a teacher in the same run")
+    e["roles"] = [r for r in ROLES if r in roles]  # always train in teacher -> baseline -> student order
 
     m = config["model"]
     _keys(m, {"architecture", "base_channels", "pretrained"}, "model")
@@ -94,20 +116,26 @@ def validate_config(raw: dict[str, Any]) -> dict[str, Any]:
     _number(s.get("temperature"), "student.temperature", strictly=True)
 
     tr = config["training"]
-    _keys(tr, {"epochs", "optimizer", "learning_rate", "weight_decay", "supervised_loss"}, "training")
+    _keys(tr, set(TRAINING_DEFAULTS) | {"epochs", "optimizer", "learning_rate", "weight_decay"}, "training")
     _integer(tr.get("epochs"), "training.epochs")
     if tr.get("optimizer") != "adamw":
         raise ValueError("training.optimizer must be adamw")
     _number(tr.get("learning_rate"), "training.learning_rate", strictly=True)
     _number(tr.get("weight_decay"), "training.weight_decay")
-    if tr.get("supervised_loss") not in {"bce_dice", "focal_dice"}:
-        raise ValueError("training.supervised_loss must be bce_dice or focal_dice")
-
-    ev = config["evaluation"]
-    _keys(ev, {"threshold"}, "evaluation")
-    threshold = _number(ev.get("threshold"), "evaluation.threshold")
-    if threshold > 1:
-        raise ValueError("evaluation.threshold must be <= 1")
+    for key, default in TRAINING_DEFAULTS.items():
+        tr.setdefault(key, default)
+    for key in ("warmup_frac", "ema_decay", "select_min_frac"):
+        if not 0 <= _number(tr[key], f"training.{key}") < 1:
+            raise ValueError(f"training.{key} must be in [0, 1)")
+    if not 0 < tr["pos_share_within"] < 1:
+        raise ValueError("training.pos_share_within must be in (0, 1)")
+    if not 0 <= tr["focal_alpha"] <= 1:
+        raise ValueError("training.focal_alpha must be in [0, 1]")
+    _number(tr["focal_gamma"], "training.focal_gamma")
+    _number(tr["grad_clip"], "training.grad_clip", strictly=True)
+    _integer(tr["smooth_window"], "training.smooth_window")
+    if not isinstance(tr["amp"], bool):
+        raise ValueError("training.amp must be boolean")
     return config
 
 

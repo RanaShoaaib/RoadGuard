@@ -31,24 +31,6 @@ def dice_loss(logits: torch.Tensor, targets: torch.Tensor, smooth: float = 1.0) 
     return (1 - score).mean()
 
 
-class BCEDiceLoss(nn.Module):
-    """Weighted BCE-with-logits plus per-image soft Dice."""
-
-    def __init__(self, bce_weight: float = 1.0, dice_weight: float = 1.0,
-                 smooth: float = 1.0) -> None:
-        super().__init__()
-        _validate_weights(bce_weight, dice_weight, smooth)
-        self.bce_weight = bce_weight
-        self.dice_weight = dice_weight
-        self.smooth = smooth
-
-    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        _validate(logits, targets)
-        bce = F.binary_cross_entropy_with_logits(logits, targets)
-        dice = dice_loss(logits, targets, self.smooth)
-        return self.bce_weight * bce + self.dice_weight * dice
-
-
 class FocalDiceLoss(nn.Module):
     """Weighted binary focal loss plus per-image soft Dice."""
 
@@ -81,18 +63,6 @@ def _validate_weights(first: float, second: float, smooth: float) -> None:
         raise ValueError("component weights must be nonnegative and not both zero")
     if smooth <= 0:
         raise ValueError("smooth must be positive")
-
-
-def build_loss(name: str, **kwargs) -> nn.Module:
-    """Construct 'bce_dice' or 'focal_dice' loss."""
-    if not isinstance(name, str):
-        raise ValueError("Loss name must be a string")
-    key = name.lower().replace("+", "_").replace("-", "_")
-    if key == "bce_dice":
-        return BCEDiceLoss(**kwargs)
-    if key == "focal_dice":
-        return FocalDiceLoss(**kwargs)
-    raise ValueError(f"Unknown loss '{name}'. Available: bce_dice, focal_dice")
 
 
 class LogitDistillationLoss(nn.Module):

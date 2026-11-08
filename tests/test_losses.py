@@ -4,29 +4,16 @@ import pytest
 import torch
 from torch.nn import functional as F
 
-from roadguard.training.losses import BCEDiceLoss, FocalDiceLoss, build_loss, dice_loss
+from roadguard.training.losses import FocalDiceLoss, dice_loss
 
 
-@pytest.mark.parametrize("name,cls", [("bce_dice", BCEDiceLoss), ("focal_dice", FocalDiceLoss)])
-def test_factory(name, cls):
-    assert isinstance(build_loss(name), cls)
-
-
-@pytest.mark.parametrize("name", ["bce_dice", "focal_dice"])
-def test_forward_backward(name):
+def test_forward_backward():
     logits = torch.randn(2, 1, 16, 20, requires_grad=True)
     targets = torch.randint(0, 2, logits.shape).float()
-    loss = build_loss(name)(logits, targets)
+    loss = FocalDiceLoss()(logits, targets)
     assert loss.ndim == 0 and torch.isfinite(loss)
     loss.backward()
     assert logits.grad is not None and torch.isfinite(logits.grad).all()
-
-
-def test_bce_component_matches_pytorch():
-    logits = torch.tensor([[[[0.0, 1.0]]]])
-    targets = torch.tensor([[[[1.0, 0.0]]]])
-    result = BCEDiceLoss(dice_weight=0)(logits, targets)
-    assert torch.allclose(result, F.binary_cross_entropy_with_logits(logits, targets))
 
 
 def test_focal_gamma_zero_reduces_to_alpha_weighted_bce():
@@ -48,27 +35,23 @@ def test_dice_per_image_average():
 def test_empty_mask_finite_and_differentiable():
     logits = torch.full((2, 1, 8, 8), -5.0, requires_grad=True)
     targets = torch.zeros_like(logits)
-    for loss_fn in (BCEDiceLoss(), FocalDiceLoss()):
-        value = loss_fn(logits, targets)
-        assert torch.isfinite(value)
-        value.backward(retain_graph=True)
+    value = FocalDiceLoss()(logits, targets)
+    assert torch.isfinite(value)
+    value.backward()
     assert torch.isfinite(logits.grad).all()
 
 
-@pytest.mark.parametrize("name", ["bce_dice", "focal_dice"])
-def test_reject_invalid_targets(name):
+def test_reject_invalid_targets():
     logits = torch.zeros(1, 1, 4, 4)
     with pytest.raises(ValueError, match="same shape"):
-        build_loss(name)(logits, torch.zeros(1, 4, 4))
+        FocalDiceLoss()(logits, torch.zeros(1, 4, 4))
     with pytest.raises(ValueError, match=r"\[0, 1\]"):
-        build_loss(name)(logits, torch.full_like(logits, 255.0))
+        FocalDiceLoss()(logits, torch.full_like(logits, 255.0))
 
 
 def test_invalid_parameters():
-    with pytest.raises(ValueError, match="Unknown loss"):
-        build_loss("unknown")
     with pytest.raises(ValueError, match="weights"):
-        BCEDiceLoss(bce_weight=0, dice_weight=0)
+        FocalDiceLoss(focal_weight=0, dice_weight=0)
     with pytest.raises(ValueError, match="alpha"):
         FocalDiceLoss(alpha=1.5)
     with pytest.raises(ValueError, match="gamma"):
@@ -78,8 +61,8 @@ def test_invalid_parameters():
 from roadguard.training.losses import LogitDistillationLoss
 
 
-@pytest.mark.parametrize("supervised", [BCEDiceLoss(), FocalDiceLoss()])
-def test_distillation_forward_backward_and_frozen_teacher(supervised):
+def test_distillation_forward_backward_and_frozen_teacher():
+    supervised = FocalDiceLoss()
     student = torch.randn(2, 1, 5, 7, requires_grad=True)
     teacher = torch.randn(2, 1, 5, 7, requires_grad=True)
     targets = torch.randint(0, 2, student.shape).float()
@@ -94,7 +77,7 @@ def test_distillation_zero_weight_matches_supervised():
     student = torch.randn(1, 1, 3, 4)
     teacher = torch.randn_like(student)
     targets = torch.zeros_like(student)
-    supervised = BCEDiceLoss()
+    supervised = FocalDiceLoss()
     actual = LogitDistillationLoss(supervised, kd_weight=0)(student, targets, teacher)
     assert torch.allclose(actual, supervised(student, targets))
 
@@ -102,7 +85,7 @@ def test_distillation_zero_weight_matches_supervised():
 def test_distillation_identical_logits_zero_kd_term():
     logits = torch.tensor([[[[-2.0, 0.0, 2.0]]]])
     targets = torch.ones_like(logits)
-    criterion = LogitDistillationLoss(BCEDiceLoss(), kd_weight=1.0, temperature=3.0)
+    criterion = LogitDistillationLoss(FocalDiceLoss(), kd_weight=1.0, temperature=3.0)
     assert criterion(logits, targets, logits).abs() < 1e-6
 
 
@@ -114,7 +97,7 @@ def test_distillation_kd_matches_bernoulli_kl():
     p = torch.sigmoid(teacher / t)
     q = torch.sigmoid(student / t)
     expected = (p * (p / q).log() + (1 - p) * ((1 - p) / (1 - q)).log()).mean() * t * t
-    actual = LogitDistillationLoss(BCEDiceLoss(), kd_weight=1.0, temperature=t)(student, targets, teacher)
+    actual = LogitDistillationLoss(FocalDiceLoss(), kd_weight=1.0, temperature=t)(student, targets, teacher)
     assert torch.allclose(actual, expected, atol=1e-6)
 
 
@@ -126,13 +109,13 @@ def test_distillation_kd_matches_bernoulli_kl():
 ])
 def test_distillation_invalid_configuration(kwargs, match):
     with pytest.raises(ValueError, match=match):
-        LogitDistillationLoss(BCEDiceLoss(), **kwargs)
+        LogitDistillationLoss(FocalDiceLoss(), **kwargs)
 
 
 def test_distillation_rejects_bad_teacher_logits():
     student = torch.zeros(1, 1, 2, 3)
     targets = torch.zeros_like(student)
-    criterion = LogitDistillationLoss(BCEDiceLoss())
+    criterion = LogitDistillationLoss(FocalDiceLoss())
     with pytest.raises(ValueError, match="same shape"):
         criterion(student, targets, torch.zeros(1, 2, 3))
     with pytest.raises(ValueError, match="finite"):

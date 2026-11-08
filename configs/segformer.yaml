@@ -1,0 +1,42 @@
+# One LOFO fold: teacher (RGB+depth) -> RGB baseline -> distilled RGB student.
+# Everything that varies between runs lives here; copy this file per experiment.
+experiment:
+  name: segformer
+  seed: 42
+  lofo_family: special          # held-out (test) family: animal | home | special
+  roles: [teacher, baseline, student]   # any subset; a student needs the teacher
+
+model:
+  architecture: segformer          # unet | segformer
+  base_channels: 32             # U-Net width (ignored by segformer)
+  pretrained: true            # nvidia/mit-b0 (needs network on first use)
+
+data:
+  image_size: [256, 256]
+  batch_size: 16
+  num_workers: 2
+
+teacher:                        # depth perturbation used only while training the teacher
+  depth_noise_std_m: 1.0
+  depth_dropout_probability: 0.3
+  depth_dropout_fraction: 0.2
+
+student:
+  kd_weight: 0.5
+  temperature: 2.0
+
+training:
+  epochs: 20
+  optimizer: adamw
+  learning_rate: 0.0001
+  weight_decay: 0.01
+  # Settled recipe (defaults shown; remove any line to use the default):
+  warmup_frac: 0.05
+  grad_clip: 1.0
+  ema_decay: 0.998              # 0 disables EMA weights
+  smooth_window: 3
+  select_min_frac: 0.5
+  pos_share_within: 0.7
+  focal_alpha: 0.25
+  focal_gamma: 2.0
+  amp: true

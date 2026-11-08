@@ -17,7 +17,7 @@ def sample_fold():
     ]:
         rows.append(dict(anomaly_family=family, anomaly_object=obj, scenario_id=scenario,
                          frame_id="0", split=split, rgb_path="r.png",
-                         depth_path="d.png", mask_path="m.png"))
+                         depth_path="d.png", mask_path="m.png", anomaly_pixels=5))
     return pd.DataFrame(rows)
 
 
@@ -58,7 +58,8 @@ def test_fold_rejects_object_leakage(tmp_path):
 
 
 def test_teacher_only_depth_augmentation():
-    config = {"data": {"image_size": [32, 32], "batch_size": 2, "num_workers": 0},
+    config = {"experiment": {"seed": 1}, "training": {"pos_share_within": 0.7},
+              "data": {"image_size": [32, 32], "batch_size": 1, "num_workers": 0},
               "teacher": {"depth_noise_std_m": 1.0,
                           "depth_dropout_probability": 0.3,
                           "depth_dropout_fraction": 0.2}}
@@ -71,3 +72,21 @@ def test_teacher_only_depth_augmentation():
     assert rgb["train"].dataset.transform.depth_dropout_probability == 0.0
     assert teacher["val"].dataset.transform.depth_noise_std_m == 0.0
     assert teacher["test"].dataset.transform.depth_dropout_probability == 0.0
+
+
+def test_train_loader_is_scenario_balanced_with_drop_last():
+    from torch.utils.data import WeightedRandomSampler
+    config = {"experiment": {"seed": 1}, "training": {"pos_share_within": 0.7},
+              "data": {"image_size": [32, 32], "batch_size": 1, "num_workers": 0}, "teacher": {}}
+    parts = {k: sample_fold().query("split == @k") for k in ("train", "val", "test")}
+    loaders = make_loaders(parts, ".", config)
+    assert isinstance(loaders["train"].sampler, WeightedRandomSampler)
+    assert loaders["train"].drop_last and not loaders["val"].drop_last
+
+
+def test_too_few_training_frames_for_one_batch_rejected():
+    config = {"experiment": {"seed": 1}, "training": {"pos_share_within": 0.7},
+              "data": {"image_size": [32, 32], "batch_size": 8, "num_workers": 0}, "teacher": {}}
+    parts = {k: sample_fold().query("split == @k") for k in ("train", "val", "test")}
+    with pytest.raises(ValueError, match="batch"):
+        make_loaders(parts, ".", config)

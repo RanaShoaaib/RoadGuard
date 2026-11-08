@@ -5,21 +5,20 @@ from pathlib import Path
 import pytest
 import yaml
 
-from roadguard.training.config import load_config, validate_config
+from roadguard.training.config import ROLES, TRAINING_DEFAULTS, load_config, validate_config
 
 
 @pytest.fixture
 def valid():
     return {
-        "experiment": {"name": "test", "seed": 42, "lofo_family": "vehicle"},
+        "experiment": {"name": "test", "seed": 42, "lofo_family": "vehicle", "roles": list(ROLES)},
         "model": {"architecture": "unet", "base_channels": 32, "pretrained": False},
         "data": {"image_size": [256, 256], "batch_size": 8, "num_workers": 0},
         "teacher": {"depth_noise_std_m": 1.0, "depth_dropout_probability": .3,
                     "depth_dropout_fraction": .2},
         "student": {"kd_weight": .5, "temperature": 2.0},
         "training": {"epochs": 20, "optimizer": "adamw", "learning_rate": 1e-4,
-                     "weight_decay": .01, "supervised_loss": "bce_dice"},
-        "evaluation": {"threshold": .5},
+                     "weight_decay": .01, **TRAINING_DEFAULTS},
     }
 
 
@@ -49,8 +48,12 @@ def test_load_yaml(tmp_path, valid):
     ("training", "epochs", 0, "epochs"),
     ("training", "optimizer", "sgd", "optimizer"),
     ("training", "learning_rate", 0, "learning_rate"),
-    ("training", "supervised_loss", "mse", "supervised_loss"),
-    ("evaluation", "threshold", 1.2, "threshold"),
+    ("training", "focal_alpha", 1.5, "focal_alpha"),
+    ("training", "ema_decay", 1.0, "ema_decay"),
+    ("training", "pos_share_within", 0, "pos_share_within"),
+    ("training", "amp", "yes", "amp"),
+    ("experiment", "roles", ["student"], "teacher"),
+    ("experiment", "roles", ["oracle"], "roles"),
 ])
 def test_invalid_values(valid, section, key, value, match):
     valid[section][key] = value
@@ -75,3 +78,24 @@ def test_invalid_yaml_root(tmp_path):
     path.write_text("- item\n", encoding="utf-8")
     with pytest.raises(ValueError, match="mapping"):
         load_config(path)
+
+
+def test_recipe_defaults_filled(valid):
+    for key in TRAINING_DEFAULTS:
+        del valid["training"][key]
+    del valid["experiment"]["roles"]
+    config = validate_config(valid)
+    assert config["training"]["focal_alpha"] == 0.25
+    assert config["training"]["ema_decay"] == 0.998
+    assert config["experiment"]["roles"] == ["teacher", "baseline", "student"]
+
+
+def test_roles_keep_canonical_order(valid):
+    valid["experiment"]["roles"] = ["baseline", "teacher"]
+    assert validate_config(valid)["experiment"]["roles"] == ["teacher", "baseline"]
+
+
+def test_shipped_configs_validate():
+    for path in sorted((Path(__file__).parents[1] / "configs").glob("*.yaml")):
+        if path.name != "data_sources.yaml":
+            load_config(path)
