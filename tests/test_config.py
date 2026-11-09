@@ -119,10 +119,11 @@ def test_partial_augment_section_keeps_other_defaults(valid):
     assert augment["crop_min_scale"] == 0.75 and augment["brightness"] == 0.0
 
 
-def test_shipped_configs_use_native_input_and_mild_augmentation():
+def test_shipped_configs_use_reduced_native_aspect_input_and_mild_augmentation():
     for name in ("unet", "segformer"):
         config = load_config(Path(__file__).parents[1] / "configs" / f"{name}.yaml")
-        assert config["data"]["image_size"] == [512, 768]            # native frames, no resizing
+        assert config["data"]["image_size"] == [384, 576]            # 0.75x of the 512x768 frames, same aspect
+        assert config["data"]["eval_native"] is True                 # but scored at original resolution
         assert all(v % 32 == 0 for v in config["data"]["image_size"])  # valid for U-Net and SegFormer
         augment = config["data"]["augment"]
         assert augment["crop_min_scale"] < 1 and augment["brightness"] > 0

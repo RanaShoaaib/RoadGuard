@@ -12,8 +12,8 @@ model:
   pretrained: true            # nvidia/mit-b0 (needs network on first use)
 
 data:
-  image_size: [512, 768]        # model input (H, W) = native frame size, no resizing. If compute is tight,
-                                # [384, 576] has 1.8x fewer pixels and keeps the aspect ratio. Use multiples of 32.
+  image_size: [384, 576]        # model input (H, W): 0.75x of the 512x768 frames, aspect ratio kept. Use multiples
+                                # of 32. [512, 768] is native (no resizing) but costs ~1.8x more compute.
   batch_size: 16
   num_workers: 8                # data decoding is CPU-bound at native size; match your VM's CPU count
   eval_native: true             # score val/test at original resolution, whatever image_size is
