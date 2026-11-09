@@ -190,3 +190,35 @@ def test_augmentation_is_reproducible_with_seed():
 def test_invalid_appearance_configuration(kwargs):
     with pytest.raises(ValueError):
         build_transforms(train=True, **kwargs)
+
+
+def test_augment_probability_controls_share_of_images_augmented():
+    plain = build_transforms(image_size=(64, 96), train=True, flip_probability=0.0)
+    tf = build_transforms(image_size=(64, 96), train=True, flip_probability=0.0, brightness=0.3,
+                          crop_min_scale=0.5, augment_probability=0.5)
+    torch.manual_seed(0)
+    reference = plain(*_frame())[0]
+    changed = 0
+    for seed in range(200):
+        torch.manual_seed(seed)
+        changed += int(not torch.equal(tf(*_frame())[0], reference))
+    assert 70 < changed < 130                                  # about half of the images are augmented
+
+
+@pytest.mark.parametrize("probability,expect_changed", [(0.0, False), (1.0, True)])
+def test_augment_probability_extremes(probability, expect_changed):
+    plain = build_transforms(image_size=(64, 96), train=True, flip_probability=0.0)
+    tf = build_transforms(image_size=(64, 96), train=True, flip_probability=0.0, brightness=0.3,
+                          crop_min_scale=0.5, augment_probability=probability)
+    reference = plain(*_frame())[0]
+    outputs = []
+    for seed in range(20):
+        torch.manual_seed(seed)
+        outputs.append(not torch.equal(tf(*_frame())[0], reference))
+    assert all(outputs) if expect_changed else not any(outputs)
+
+
+@pytest.mark.parametrize("value", [-0.1, 1.5, float("nan")])
+def test_invalid_augment_probability(value):
+    with pytest.raises(ValueError, match="augment_probability"):
+        build_transforms(train=True, augment_probability=value)

@@ -17,11 +17,12 @@ data:
   batch_size: 16
   num_workers: 8                # data decoding is CPU-bound at native size; match your VM's CPU count
   eval_native: true             # score val/test at original resolution, whatever image_size is
-  augment:                      # training-only RGB augmentation (horizontal flip is always on); 0 / 1.0 = off
+  augment:                      # training-only RGB augmentation; the horizontal flip is separate, always 50%
     brightness: 0.2             # RGB brightness x U(0.8, 1.2)
     contrast: 0.2
     saturation: 0.2
     crop_min_scale: 0.75        # crop covers 75-100% of the frame and always keeps the whole anomaly
+    probability: 0.5            # share of training images that get the color changes + crop (flip is separate)
 
 teacher:                        # depth perturbation used only while training the teacher
   depth_noise_std_m: 1.0

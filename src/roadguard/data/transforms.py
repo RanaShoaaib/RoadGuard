@@ -44,6 +44,7 @@ class PairedTransforms:
     contrast: float = 0.0         # RGB contrast scaled by U(1 - c, 1 + c)
     saturation: float = 0.0       # RGB saturation scaled by U(1 - s, 1 + s)
     crop_min_scale: float = 1.0   # crop covers U(crop_min_scale, 1) of the frame area; 1 disables
+    augment_probability: float = 1.0   # share of training images that get the jitter and crop (together)
 
     def __post_init__(self) -> None:
         if len(self.image_size) != 2 or any(not isinstance(v, int) or isinstance(v, bool) or v <= 0 for v in self.image_size):
@@ -64,6 +65,8 @@ class PairedTransforms:
                 raise ValueError(f"{name} must be in [0, 1)")
         if not np.isfinite(self.crop_min_scale) or not 0 < self.crop_min_scale <= 1:
             raise ValueError("crop_min_scale must be in (0, 1]")
+        if not np.isfinite(self.augment_probability) or not 0 <= self.augment_probability <= 1:
+            raise ValueError("augment_probability must be in [0, 1]")
 
     @staticmethod
     def _factor(amount: float) -> float:
@@ -125,7 +128,7 @@ class PairedTransforms:
         depth_t = depth_t.clamp(0.0, self.max_depth_m) / self.max_depth_m
         mask_t = torch.from_numpy(np.array(raw_mask, copy=True)).unsqueeze(0).float() / 255.0
 
-        if self.train:
+        if self.train and (self.augment_probability >= 1.0 or torch.rand(()).item() < self.augment_probability):
             rgb_t = self._color_jitter(rgb_t)
             rgb_t, depth_t, mask_t = self._random_crop(rgb_t, depth_t, mask_t)
 
@@ -166,6 +169,7 @@ def build_transforms(
     contrast: float = 0.0,
     saturation: float = 0.0,
     crop_min_scale: float = 1.0,
+    augment_probability: float = 1.0,
 ) -> PairedTransforms:
     """Build train or deterministic evaluation transforms; size is (H, W)."""
     return PairedTransforms(
@@ -174,4 +178,5 @@ def build_transforms(
         depth_dropout_probability=depth_dropout_probability,
         depth_dropout_fraction=depth_dropout_fraction, brightness=brightness,
         contrast=contrast, saturation=saturation, crop_min_scale=crop_min_scale,
+        augment_probability=augment_probability,
     )

@@ -57,6 +57,7 @@ def test_load_yaml(tmp_path, valid):
     ("data", "augment", {"brightness": 1.0}, "brightness"),
     ("data", "augment", {"crop_min_scale": 0.0}, "crop_min_scale"),
     ("data", "augment", {"rotation": 10}, "rotation"),
+    ("data", "augment", {"probability": 1.5}, "probability"),
     ("experiment", "roles", ["student"], "teacher"),
     ("experiment", "roles", ["oracle"], "roles"),
 ])
@@ -127,3 +128,4 @@ def test_shipped_configs_use_reduced_native_aspect_input_and_mild_augmentation()
         assert all(v % 32 == 0 for v in config["data"]["image_size"])  # valid for U-Net and SegFormer
         augment = config["data"]["augment"]
         assert augment["crop_min_scale"] < 1 and augment["brightness"] > 0
+        assert augment["probability"] == 0.5                         # half of the images are augmented

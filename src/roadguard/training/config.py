@@ -12,7 +12,8 @@ import yaml
 ROLES = ("teacher", "baseline", "student")
 
 # Training-only RGB augmentation; the defaults leave it off. Horizontal flip is always on.
-AUGMENT_DEFAULTS = {"brightness": 0.0, "contrast": 0.0, "saturation": 0.0, "crop_min_scale": 1.0}
+AUGMENT_DEFAULTS = {"brightness": 0.0, "contrast": 0.0, "saturation": 0.0, "crop_min_scale": 1.0,
+                    "probability": 1.0}   # probability: share of images that get the jitter and crop
 
 # The recipe settled by the notebook-04 ladder; every key can be overridden in the YAML.
 TRAINING_DEFAULTS = {
@@ -111,6 +112,8 @@ def validate_config(raw: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(f"data.augment.{key} must be in [0, 1)")
     if not 0 < _number(augment["crop_min_scale"], "data.augment.crop_min_scale") <= 1:
         raise ValueError("data.augment.crop_min_scale must be in (0, 1]")
+    if not 0 <= _number(augment["probability"], "data.augment.probability") <= 1:
+        raise ValueError("data.augment.probability must be in [0, 1]")
 
     t = config["teacher"]
     _keys(t, {"depth_noise_std_m", "depth_dropout_probability", "depth_dropout_fraction"}, "teacher")

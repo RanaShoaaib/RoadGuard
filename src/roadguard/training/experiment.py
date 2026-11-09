@@ -71,7 +71,9 @@ def make_loaders(parts: dict[str, pd.DataFrame], data_root: str | Path, config: 
     """
     size = tuple(config["data"]["image_size"])
     depth_args = config["teacher"] if teacher_train else {}
-    train_tf = build_transforms(image_size=size, train=True, **depth_args, **config["data"]["augment"])
+    augment = dict(config["data"]["augment"])
+    augment["augment_probability"] = augment.pop("probability", 1.0)
+    train_tf = build_transforms(image_size=size, train=True, **depth_args, **augment)
     eval_tf = build_transforms(image_size=size, train=False)
     workers = config["data"]["num_workers"]
     common = dict(batch_size=config["data"]["batch_size"], num_workers=workers,
