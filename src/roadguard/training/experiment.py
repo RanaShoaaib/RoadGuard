@@ -64,20 +64,22 @@ def make_loaders(parts: dict[str, pd.DataFrame], data_root: str | Path, config: 
                  *, teacher_train: bool = False) -> dict[str, DataLoader]:
     """Train loader draws scenario-balanced; val/test are deterministic.
 
-    Teacher training gets depth perturbations; other roles use clean depth. Every call returns
+    Teacher training gets depth perturbations; other roles use clean depth. With
+    ``data.eval_native`` the val/test loaders also supply original-resolution masks. Every call returns
     loaders in the same initial random state, so call it once per role: baseline and student
     then see the identical sequence of training frames and augmentations.
     """
     size = tuple(config["data"]["image_size"])
     depth_args = config["teacher"] if teacher_train else {}
-    train_tf = build_transforms(image_size=size, train=True, **depth_args)
+    train_tf = build_transforms(image_size=size, train=True, **depth_args, **config["data"]["augment"])
     eval_tf = build_transforms(image_size=size, train=False)
     workers = config["data"]["num_workers"]
     common = dict(batch_size=config["data"]["batch_size"], num_workers=workers,
                   pin_memory=torch.cuda.is_available(), persistent_workers=workers > 0)
     loaders = {}
     for split in ("train", "val", "test"):
-        dataset = RoadGuardDataset(parts[split], data_root, transform=train_tf if split == "train" else eval_tf)
+        dataset = RoadGuardDataset(parts[split], data_root, transform=train_tf if split == "train" else eval_tf,
+                                   native_mask=split != "train" and config["data"]["eval_native"])
         if split == "train":
             sampler = make_scenario_balanced_sampler(
                 parts["train"], config["training"]["pos_share_within"], seed=config["experiment"]["seed"])

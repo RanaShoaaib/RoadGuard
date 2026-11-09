@@ -97,3 +97,15 @@ def test_depth_rgb_bytes_preserved(sample):
     original = np.asarray(Image.open(root / "depth.png"))
     actual = RoadGuardDataset(manifest, root)[0]["depth"].permute(1, 2, 0).numpy()
     np.testing.assert_array_equal(actual, original.astype(np.float32))
+
+
+def test_native_mask_is_original_resolution_and_optional(sample):
+    from roadguard.data.transforms import build_transforms
+    root, manifest = sample
+    tf = build_transforms(image_size=(2, 3), train=False)
+    default = RoadGuardDataset(manifest, root, transform=tf)[0]
+    native = RoadGuardDataset(manifest, root, transform=tf, native_mask=True)[0]
+    assert "mask_native" not in default
+    assert native["mask"].shape == (1, 2, 3)              # resized, matches the model input
+    assert native["mask_native"].shape == (1, 4, 6)       # untouched original
+    assert native["mask_native"].sum() == 4 and native["mask_native"].dtype == torch.float32

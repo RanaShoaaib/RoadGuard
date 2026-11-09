@@ -153,3 +153,19 @@ def test_ema_update_formula_and_buffers_copied():
 def test_ema_rejects_bad_decay():
     with pytest.raises(ValueError, match="decay"):
         EMA(nn.Linear(1, 1), 1.0)
+
+
+def test_collect_scores_at_native_resolution_when_available():
+    """The model sees 8x8 but metrics are computed on the 16x16 original masks."""
+    class Native(Dataset):
+        def __len__(self):
+            return 4
+        def __getitem__(self, i):
+            native = torch.zeros(1, 16, 16)
+            native[:, 4:12, 4:12] = float(i % 2)
+            return {"image": torch.zeros(3, 8, 8), "mask": torch.zeros(1, 8, 8), "mask_native": native,
+                    "scenario_id": "s%d" % (i % 2)}
+    acc = collect(nn.Conv2d(3, 1, 1), DataLoader(Native(), batch_size=2), "cpu")
+    pooled = acc.pooled
+    assert int(pooled.pos.sum() + pooled.neg.sum()) == 4 * 16 * 16        # every native pixel scored once
+    assert int(pooled.pos.sum()) == 2 * 8 * 8                             # positives from the native masks

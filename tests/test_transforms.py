@@ -128,3 +128,65 @@ def test_depth_augmentation_is_reproducible_with_seed():
 def test_invalid_depth_augmentation_configuration(kwargs, match):
     with pytest.raises(ValueError, match=match):
         build_transforms(**kwargs)
+
+
+def _frame(h=64, w=96, box=(20, 24, 4, 4)):
+    rgb = Image.fromarray(np.random.default_rng(0).integers(60, 200, (h, w, 3), dtype=np.uint8))
+    depth = Image.fromarray(np.zeros((h, w, 3), dtype=np.uint8))
+    mask = np.zeros((h, w), dtype=np.uint8)
+    y, x, bh, bw = box
+    mask[y:y + bh, x:x + bw] = 255
+    return rgb, depth, Image.fromarray(mask)
+
+
+def test_crop_always_keeps_the_whole_anomaly_and_is_synchronized():
+    tf = build_transforms(image_size=(64, 96), train=True, flip_probability=0.0, crop_min_scale=0.4)
+    grew = 0
+    for seed in range(60):
+        torch.manual_seed(seed)
+        _, depth, mask = tf(*_frame())
+        assert mask.sum() >= 16 and depth.shape == mask.shape       # anomaly never lost or cut
+        grew += int(mask.sum() > 16)                                # crop zoomed in on it
+    assert grew > 30
+
+
+def test_crop_skipped_when_anomaly_larger_than_window():
+    tf = build_transforms(image_size=(64, 96), train=True, flip_probability=0.0, crop_min_scale=0.25)
+    for seed in range(10):
+        torch.manual_seed(seed)
+        _, _, mask = tf(*_frame(box=(0, 0, 64, 96)))
+        assert mask.sum() == 64 * 96
+
+
+def test_color_jitter_changes_rgb_only_and_stays_valid():
+    plain = build_transforms(image_size=(64, 96), train=True, flip_probability=0.0)
+    jitter = build_transforms(image_size=(64, 96), train=True, flip_probability=0.0,
+                              brightness=0.3, contrast=0.3, saturation=0.3)
+    torch.manual_seed(0)
+    rgb_a, depth_a, mask_a = plain(*_frame())
+    torch.manual_seed(0)
+    rgb_b, depth_b, mask_b = jitter(*_frame())
+    assert not torch.allclose(rgb_a, rgb_b)
+    assert torch.equal(depth_a, depth_b) and torch.equal(mask_a, mask_b)
+    assert torch.isfinite(rgb_b).all() and rgb_b.min() >= -2.2 and rgb_b.max() <= 2.7   # clamped to [0, 1] pre-normalisation
+
+def test_eval_ignores_appearance_and_crop_augmentation():
+    plain = build_transforms(image_size=(64, 96), train=False)
+    strong = build_transforms(image_size=(64, 96), train=False, brightness=0.5, contrast=0.5,
+                              saturation=0.5, crop_min_scale=0.3)
+    for a, b in zip(plain(*_frame()), strong(*_frame())):
+        assert torch.equal(a, b)
+
+
+def test_augmentation_is_reproducible_with_seed():
+    tf = build_transforms(image_size=(64, 96), train=True, brightness=0.3, crop_min_scale=0.5)
+    torch.manual_seed(5); first = tf(*_frame())
+    torch.manual_seed(5); second = tf(*_frame())
+    assert all(torch.equal(a, b) for a, b in zip(first, second))
+
+
+@pytest.mark.parametrize("kwargs", [{"brightness": 1.0}, {"contrast": -0.1}, {"saturation": float("nan")},
+                                    {"crop_min_scale": 0.0}, {"crop_min_scale": 1.2}])
+def test_invalid_appearance_configuration(kwargs):
+    with pytest.raises(ValueError):
+        build_transforms(train=True, **kwargs)

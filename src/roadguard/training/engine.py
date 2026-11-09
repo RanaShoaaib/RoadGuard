@@ -9,6 +9,7 @@ import math
 from copy import deepcopy
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 from torch.utils.data import DataLoader
 
@@ -124,7 +125,11 @@ def train_one_epoch(model: nn.Module, loader: DataLoader, criterion: nn.Module,
 @torch.no_grad()
 def collect(model: nn.Module, loader: DataLoader, device: torch.device | str,
             in_channels: int = 3, amp: bool = False) -> EvalAccumulator:
-    """Run ``model`` over ``loader`` and accumulate logit-space evaluation curves."""
+    """Run ``model`` over ``loader`` and accumulate logit-space evaluation curves.
+
+    If the batches carry ``mask_native``, logits are bilinearly upsampled to it and every metric is
+    computed at original resolution, so runs with different input sizes are scored identically.
+    """
     model.eval()
     accumulator = EvalAccumulator()
     seen = 0
@@ -132,7 +137,13 @@ def collect(model: nn.Module, loader: DataLoader, device: torch.device | str,
         inputs, targets = _prepare_batch(batch, device, in_channels)
         with _autocast(device, amp):
             logits = model(inputs)
-        accumulator.update(logits.float(), targets, batch["scenario_id"])
+        logits = logits.float()
+        native = batch.get("mask_native")
+        if native is not None:     # score against the original mask, whatever size the model saw
+            targets = native.to(device=device, dtype=torch.float32)
+            if logits.shape[-2:] != targets.shape[-2:]:
+                logits = F.interpolate(logits, size=targets.shape[-2:], mode="bilinear", align_corners=False)
+        accumulator.update(logits, targets, batch["scenario_id"])
         seen += inputs.shape[0]
     if seen == 0:
         raise ValueError("DataLoader yielded no samples")

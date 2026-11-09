@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from roadguard.training.config import ROLES, TRAINING_DEFAULTS, load_config, validate_config
+from roadguard.training.config import AUGMENT_DEFAULTS, ROLES, TRAINING_DEFAULTS, load_config, validate_config
 
 
 @pytest.fixture
@@ -13,7 +13,8 @@ def valid():
     return {
         "experiment": {"name": "test", "seed": 42, "lofo_family": "vehicle", "roles": list(ROLES)},
         "model": {"architecture": "unet", "base_channels": 32, "pretrained": False},
-        "data": {"image_size": [256, 256], "batch_size": 8, "num_workers": 0},
+        "data": {"image_size": [256, 256], "batch_size": 8, "num_workers": 0, "eval_native": True,
+                 "augment": dict(AUGMENT_DEFAULTS)},
         "teacher": {"depth_noise_std_m": 1.0, "depth_dropout_probability": .3,
                     "depth_dropout_fraction": .2},
         "student": {"kd_weight": .5, "temperature": 2.0},
@@ -52,6 +53,10 @@ def test_load_yaml(tmp_path, valid):
     ("training", "ema_decay", 1.0, "ema_decay"),
     ("training", "pos_share_within", 0, "pos_share_within"),
     ("training", "amp", "yes", "amp"),
+    ("data", "eval_native", "yes", "eval_native"),
+    ("data", "augment", {"brightness": 1.0}, "brightness"),
+    ("data", "augment", {"crop_min_scale": 0.0}, "crop_min_scale"),
+    ("data", "augment", {"rotation": 10}, "rotation"),
     ("experiment", "roles", ["student"], "teacher"),
     ("experiment", "roles", ["oracle"], "roles"),
 ])
@@ -99,3 +104,25 @@ def test_shipped_configs_validate():
     for path in sorted((Path(__file__).parents[1] / "configs").glob("*.yaml")):
         if path.name != "data_sources.yaml":
             load_config(path)
+
+
+def test_data_defaults_filled(valid):
+    del valid["data"]["eval_native"], valid["data"]["augment"]
+    config = validate_config(valid)
+    assert config["data"]["eval_native"] is True
+    assert config["data"]["augment"] == AUGMENT_DEFAULTS            # augmentation off by default
+
+
+def test_partial_augment_section_keeps_other_defaults(valid):
+    valid["data"]["augment"] = {"crop_min_scale": 0.75}
+    augment = validate_config(valid)["data"]["augment"]
+    assert augment["crop_min_scale"] == 0.75 and augment["brightness"] == 0.0
+
+
+def test_shipped_configs_use_native_input_and_mild_augmentation():
+    for name in ("unet", "segformer"):
+        config = load_config(Path(__file__).parents[1] / "configs" / f"{name}.yaml")
+        assert config["data"]["image_size"] == [512, 768]            # native frames, no resizing
+        assert all(v % 32 == 0 for v in config["data"]["image_size"])  # valid for U-Net and SegFormer
+        augment = config["data"]["augment"]
+        assert augment["crop_min_scale"] < 1 and augment["brightness"] > 0

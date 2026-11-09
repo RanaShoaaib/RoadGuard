@@ -11,8 +11,8 @@ from PIL import Image
 from roadguard.training.experiment import run_experiment
 
 
-@pytest.mark.parametrize("architecture", ["unet", "segformer"])
-def test_complete_three_role_experiment(tmp_path, architecture, monkeypatch):
+@pytest.mark.parametrize("architecture,image_size", [("unet", 32), ("unet", 16), ("segformer", 32)])
+def test_complete_three_role_experiment(tmp_path, architecture, image_size, monkeypatch):
     if architecture == "segformer":
         pytest.importorskip("transformers")
     held_out_family = "special"
@@ -55,7 +55,8 @@ def test_complete_three_role_experiment(tmp_path, architecture, monkeypatch):
     config = {
         "experiment": {"name": "smoke", "seed": 42, "lofo_family": held_out_family},
         "model": {"architecture": architecture, "base_channels": 2, "pretrained": False},
-        "data": {"image_size": [32, 32], "batch_size": 2, "num_workers": 0},
+        "data": {"image_size": [image_size, image_size], "batch_size": 2, "num_workers": 0,
+                 "augment": {"brightness": 0.2, "contrast": 0.2, "saturation": 0.2, "crop_min_scale": 0.75}},
         "teacher": {"depth_noise_std_m": 1.0,
                     "depth_dropout_probability": 1.0,
                     "depth_dropout_fraction": 0.2},

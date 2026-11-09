@@ -59,7 +59,8 @@ def test_fold_rejects_object_leakage(tmp_path):
 
 def test_teacher_only_depth_augmentation():
     config = {"experiment": {"seed": 1}, "training": {"pos_share_within": 0.7},
-              "data": {"image_size": [32, 32], "batch_size": 1, "num_workers": 0},
+              "data": {"image_size": [32, 32], "batch_size": 1, "num_workers": 0, "eval_native": True,
+                       "augment": {"brightness": 0.0, "contrast": 0.0, "saturation": 0.0, "crop_min_scale": 1.0}},
               "teacher": {"depth_noise_std_m": 1.0,
                           "depth_dropout_probability": 0.3,
                           "depth_dropout_fraction": 0.2}}
@@ -77,7 +78,8 @@ def test_teacher_only_depth_augmentation():
 def test_train_loader_is_scenario_balanced_with_drop_last():
     from torch.utils.data import WeightedRandomSampler
     config = {"experiment": {"seed": 1}, "training": {"pos_share_within": 0.7},
-              "data": {"image_size": [32, 32], "batch_size": 1, "num_workers": 0}, "teacher": {}}
+              "data": {"image_size": [32, 32], "batch_size": 1, "num_workers": 0, "eval_native": True,
+                       "augment": {"brightness": 0.0, "contrast": 0.0, "saturation": 0.0, "crop_min_scale": 1.0}}, "teacher": {}}
     parts = {k: sample_fold().query("split == @k") for k in ("train", "val", "test")}
     loaders = make_loaders(parts, ".", config)
     assert isinstance(loaders["train"].sampler, WeightedRandomSampler)
@@ -86,7 +88,8 @@ def test_train_loader_is_scenario_balanced_with_drop_last():
 
 def test_too_few_training_frames_for_one_batch_rejected():
     config = {"experiment": {"seed": 1}, "training": {"pos_share_within": 0.7},
-              "data": {"image_size": [32, 32], "batch_size": 8, "num_workers": 0}, "teacher": {}}
+              "data": {"image_size": [32, 32], "batch_size": 8, "num_workers": 0, "eval_native": True,
+                       "augment": {"brightness": 0.0, "contrast": 0.0, "saturation": 0.0, "crop_min_scale": 1.0}}, "teacher": {}}
     parts = {k: sample_fold().query("split == @k") for k in ("train", "val", "test")}
     with pytest.raises(ValueError, match="batch"):
         make_loaders(parts, ".", config)
@@ -95,7 +98,8 @@ def test_too_few_training_frames_for_one_batch_rejected():
 def test_every_call_gives_identically_seeded_train_loader():
     """Baseline and student each get a fresh loader and must draw the same frames in the same order."""
     config = {"experiment": {"seed": 7}, "training": {"pos_share_within": 0.7},
-              "data": {"image_size": [32, 32], "batch_size": 1, "num_workers": 0}, "teacher": {}}
+              "data": {"image_size": [32, 32], "batch_size": 1, "num_workers": 0, "eval_native": True,
+                       "augment": {"brightness": 0.0, "contrast": 0.0, "saturation": 0.0, "crop_min_scale": 1.0}}, "teacher": {}}
     parts = {k: sample_fold().query("split == @k") for k in ("train", "val", "test")}
     parts["train"] = pd.concat([parts["train"].assign(frame_id=str(i)) for i in range(40)])   # 80 frames
     first = make_loaders(parts, ".", config)["train"]
@@ -103,3 +107,15 @@ def test_every_call_gives_identically_seeded_train_loader():
     assert list(first.sampler) == list(second.sampler)
     assert list(first.sampler) != list(first.sampler)         # one loader advances between epochs
     assert first.generator.initial_seed() == second.generator.initial_seed() == 7
+
+
+def test_eval_loaders_supply_native_masks_only_when_enabled():
+    base = {"experiment": {"seed": 1}, "training": {"pos_share_within": 0.7}, "teacher": {},
+            "data": {"image_size": [16, 16], "batch_size": 1, "num_workers": 0, "eval_native": True,
+                     "augment": {"brightness": 0.0, "contrast": 0.0, "saturation": 0.0, "crop_min_scale": 1.0}}}
+    parts = {k: sample_fold().query("split == @k") for k in ("train", "val", "test")}
+    parts["train"] = pd.concat([parts["train"].assign(frame_id=str(i)) for i in range(4)])
+    assert make_loaders(parts, ".", base)["val"].dataset.native_mask is True
+    assert make_loaders(parts, ".", base)["train"].dataset.native_mask is False
+    base["data"]["eval_native"] = False
+    assert make_loaders(parts, ".", base)["val"].dataset.native_mask is False

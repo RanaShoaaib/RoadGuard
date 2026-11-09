@@ -16,13 +16,14 @@ class RoadGuardDataset(Dataset):
     returns three PIL images, NumPy arrays, or tensors in the same order.
     RGB uint8 inputs become float32 in [0, 1]. Untransformed CARLA depth
     retains its three encoded uint8 channels (as float32); the paired transform
-    decodes depth to a normalized single-channel float tensor.
+    decodes depth to a normalized single-channel float tensor. With ``native_mask=True`` each
+    sample also carries ``mask_native`` (the untouched original-resolution mask, [1, H0, W0]).
     """
 
     REQUIRED_COLUMNS = ("rgb_path", "depth_path", "mask_path", "scenario_id", "frame_id")
 
     def __init__(self, manifest: pd.DataFrame, data_root: str | Path,
-                 transform: Callable | None = None) -> None:
+                 transform: Callable | None = None, native_mask: bool = False) -> None:
         missing = set(self.REQUIRED_COLUMNS) - set(manifest.columns)
         if missing:
             raise ValueError(f"Missing manifest columns: {sorted(missing)}")
@@ -33,6 +34,7 @@ class RoadGuardDataset(Dataset):
         self.manifest = manifest.reset_index(drop=True).copy()
         self.data_root = Path(data_root)
         self.transform = transform
+        self.native_mask = native_mask
 
     def __len__(self) -> int:
         return len(self.manifest)
@@ -67,13 +69,17 @@ class RoadGuardDataset(Dataset):
         mask_tensor = self._mask_tensor(mask)
         if len({image_tensor.shape[-2:], depth_tensor.shape[-2:], mask_tensor.shape[-2:]}) != 1:
             raise ValueError("Transformed image, depth, and mask have different spatial sizes")
-        return {
+        sample = {
             "image": image_tensor,
             "depth": depth_tensor,
             "mask": mask_tensor,
             "scenario_id": str(row["scenario_id"]),
             "frame_id": str(row["frame_id"]),
         }
+        if self.native_mask:
+            # Original-resolution mask, used to score predictions independently of the input size.
+            sample["mask_native"] = torch.from_numpy(original_mask > 0).float().unsqueeze(0)
+        return sample
 
     @staticmethod
     def _image_tensor(image) -> torch.Tensor:

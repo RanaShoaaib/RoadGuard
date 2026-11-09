@@ -12,9 +12,16 @@ model:
   pretrained: true            # nvidia/mit-b0 (needs network on first use)
 
 data:
-  image_size: [256, 256]
+  image_size: [512, 768]        # model input (H, W) = native frame size, no resizing. If compute is tight,
+                                # [384, 576] has 1.8x fewer pixels and keeps the aspect ratio. Use multiples of 32.
   batch_size: 16
-  num_workers: 2
+  num_workers: 8                # data decoding is CPU-bound at native size; match your VM's CPU count
+  eval_native: true             # score val/test at original resolution, whatever image_size is
+  augment:                      # training-only RGB augmentation (horizontal flip is always on); 0 / 1.0 = off
+    brightness: 0.2             # RGB brightness x U(0.8, 1.2)
+    contrast: 0.2
+    saturation: 0.2
+    crop_min_scale: 0.75        # crop covers 75-100% of the frame and always keeps the whole anomaly
 
 teacher:                        # depth perturbation used only while training the teacher
   depth_noise_std_m: 1.0

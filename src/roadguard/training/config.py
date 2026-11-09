@@ -11,6 +11,9 @@ import yaml
 
 ROLES = ("teacher", "baseline", "student")
 
+# Training-only RGB augmentation; the defaults leave it off. Horizontal flip is always on.
+AUGMENT_DEFAULTS = {"brightness": 0.0, "contrast": 0.0, "saturation": 0.0, "crop_min_scale": 1.0}
+
 # The recipe settled by the notebook-04 ladder; every key can be overridden in the YAML.
 TRAINING_DEFAULTS = {
     "warmup_frac": 0.05,      # linear LR warmup, then cosine decay
@@ -86,7 +89,7 @@ def validate_config(raw: dict[str, Any]) -> dict[str, Any]:
     m.setdefault("pretrained", False)
 
     d = config["data"]
-    _keys(d, {"image_size", "batch_size", "num_workers"}, "data")
+    _keys(d, {"image_size", "batch_size", "num_workers", "eval_native", "augment"}, "data")
     size = d.get("image_size")
     if not isinstance(size, (list, tuple)) or len(size) != 2:
         raise ValueError("data.image_size must contain [height, width]")
@@ -95,6 +98,19 @@ def validate_config(raw: dict[str, Any]) -> dict[str, Any]:
     _integer(d.get("batch_size"), "data.batch_size")
     _integer(d.get("num_workers", 0), "data.num_workers", 0)
     d.setdefault("num_workers", 0)
+    if not isinstance(d.setdefault("eval_native", True), bool):
+        raise ValueError("data.eval_native must be boolean")
+    augment = d.setdefault("augment", {})
+    if not isinstance(augment, dict):
+        raise ValueError("data.augment must be a mapping")
+    _keys(augment, set(AUGMENT_DEFAULTS), "data.augment")
+    for key, default in AUGMENT_DEFAULTS.items():
+        augment.setdefault(key, default)
+    for key in ("brightness", "contrast", "saturation"):
+        if not 0 <= _number(augment[key], f"data.augment.{key}") < 1:
+            raise ValueError(f"data.augment.{key} must be in [0, 1)")
+    if not 0 < _number(augment["crop_min_scale"], "data.augment.crop_min_scale") <= 1:
+        raise ValueError("data.augment.crop_min_scale must be in (0, 1]")
 
     t = config["teacher"]
     _keys(t, {"depth_noise_std_m", "depth_dropout_probability", "depth_dropout_fraction"}, "teacher")
